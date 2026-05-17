@@ -46,15 +46,15 @@ Inspirado directamente por la estética de **Nidhogg (2014)**, el juego adoptar�
 
 *   **Minimalismo Extremo (Pixel Art Lo-Fi):** Los personajes no tendrán rostros detallados ni texturas complejas. Serán siluetas vibrantes y minimalistas (estilo Atari 2600 moderno). Esto permite que el jugador se centre en la fluidez del movimiento y en la red de conexiones.
 *   **Contraste y Color:**
-    *   **Fondos:** Serán oscuros, profundos o con patrones psicodélicos muy sutiles para generar atmósfera.
-    *   **Retratos:** Serán bloques de color sólido neón (ej: Hombre en azul eléctrico, Mujer en rosa vibrante).
-    *   **Savia/Raíces:** Líneas de luz pura (dorado/amarillo neón) que contrastan fuertemente con el fondo.
+	*   **Fondos:** Serán oscuros, profundos o con patrones psicodélicos muy sutiles para generar atmósfera.
+	*   **Retratos:** Serán bloques de color sólido neón (ej: Hombre en azul eléctrico, Mujer en rosa vibrante).
+	*   **Savia/Raíces:** Líneas de luz pura (dorado/amarillo neón) que contrastan fuertemente con el fondo.
 *   **El "Rastro del Linaje":** Al igual que la sangre en Nidhogg, las raíces que el jugador extienda dejarán una **mancha de luz persistente**. Al final de muchas generaciones, el fondo oscuro estará "pintado" por los caminos que tomaron los ancestros, creando una obra de arte generativa única en cada partida.
 *   **Animación Fluida:** A pesar de la baja resolución de los sprites, las animaciones de las raíces al crecer y de los retratos al "fusionarse" serán extremadamente fluidas, dando una sensación orgánica y viva.
 *   **Envejecimiento Dinámico:** A medida que el linaje avanza y los retratos quedan en la parte superior de la pantalla (pasando a ser ancestros), estos deben "envejecer" visualmente.
-    *   **Efecto:** Se simulará el paso del tiempo mediante la aparición de líneas sutiles (oscuras o claras según el color base) que cruzan los rostros, representando arrugas o las vetas de la madera vieja. Esto refuerza la idea de que los cimientos del árbol son antiguos y sabios.
+	*   **Efecto:** Se simulará el paso del tiempo mediante la aparición de líneas sutiles (oscuras o claras según el color base) que cruzan los rostros, representando arrugas o las vetas de la madera vieja. Esto refuerza la idea de que los cimientos del árbol son antiguos y sabios.
 *   **Monumentos de la Historia:** A medida que la cámara se desplaza hacia abajo con las nuevas generaciones, aparecerán en los márgenes laterales (izquierda y derecha) **estatuas de estilo griego y romano** (hombres y mujeres de piedra).
-    *   **Propósito:** Estos monumentos llevarán grabados **mensajes narrativos o de ánimo** que invitan al jugador a seguir profundizando en el linaje. Representan la "memoria de piedra" de la humanidad, dando una sensación de escala épica y trascendencia al progreso del jugador.
+	*   **Propósito:** Estos monumentos llevarán grabados **mensajes narrativos o de ánimo** que invitan al jugador a seguir profundizando en el linaje. Representan la "memoria de piedra" de la humanidad, dando una sensación de escala épica y trascendencia al progreso del jugador.
 *   **Ventaja de Producción:** Este estilo permite generar assets rápidamente durante la Jam, priorizando el "feeling" y la jugabilidad sobre el pulido gráfico tradicional.
 
 ## 7. Audio y Música: Atmósfera "Dark Gregorian Phonk"
@@ -63,9 +63,9 @@ Inspirada en el estilo **Dark Gregorian Phonk** (ej: *Ave Maria | Dark Gregorian
 *   **Estilo:** **Dark Gregorian Phonk**. Una poderosa fusión de música coral sacra o cantos gregorianos con una agresiva producción moderna de phonk/trap. Bajos muy pesados (808s saturados), percusión trap contundente, sintetizadores oscuros y efectos de glitch.
 *   **Atmósfera:** Oscura, mística, épica y profundamente dramática. Debe sentirse como un ritual sagrado antiguo colisionando con un ritmo frenético y pesado. La solemnidad melancólica de las voces corales contrasta perfectamente con la velocidad y urgencia puramente "Arcade" de conectar las raíces a tiempo.
 *   **Efectos de Sonido (SFX):** 
-    *   Percusiones secas y contundentes (estilo phonk cowbells o claps pesados) para marcar los ritmos de cada clic y confirmación de unión.
-    *   Ecos de cánticos corales o voces sagradas distorsionadas que resuenan cuando la cámara desciende y nace una nueva generación.
-    *   Sonidos de madera antigua crujiendo violentamente, acompañados de subgraves profundos, para la tensión de expandir o retraer rápidamente la raíz.
+	*   Percusiones secas y contundentes (estilo phonk cowbells o claps pesados) para marcar los ritmos de cada clic y confirmación de unión.
+	*   Ecos de cánticos corales o voces sagradas distorsionadas que resuenan cuando la cámara desciende y nace una nueva generación.
+	*   Sonidos de madera antigua crujiendo violentamente, acompañados de subgraves profundos, para la tensión de expandir o retraer rápidamente la raíz.
 
 ## 8. Lista de Assets (Tareas Pendientes)
 

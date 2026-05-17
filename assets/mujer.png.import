@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ccweh5ohshq2v"
-path="res://.godot/imported/man_torso.png-886df93b1f74e9a7c63a9a64f4009df3.ctex"
+uid="uid://cs4jk2e2o4gwp"
+path="res://.godot/imported/mujer.png-5b5b2a530c8f7c88f6bb169c3d10f3a9.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/man_torso.png"
-dest_files=["res://.godot/imported/man_torso.png-886df93b1f74e9a7c63a9a64f4009df3.ctex"]
+source_file="res://assets/mujer.png"
+dest_files=["res://.godot/imported/mujer.png-5b5b2a530c8f7c88f6bb169c3d10f3a9.ctex"]
 
 [params]
 

@@ -1,17 +1,18 @@
-[gd_scene load_steps=2 format=3 uid="uid://df7w88h6y550h"]
+[gd_scene format=3 uid="uid://df7w88h6y550h"]
 
-[ext_resource type="Script" path="res://Main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://kvnx4qrbgvpi" path="res://Main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://bkgr2ucprj713" path="res://PortraitFrame.gd" id="2_portrait_frame"]
 
-[node name="Main" type="Node2D"]
+[node name="Main" type="Node2D" unique_id=517794833]
 script = ExtResource("1_main")
 
-[node name="MainCamera" type="Camera2D" parent="."]
+[node name="MainCamera" type="Camera2D" parent="." unique_id=723715679]
 anchor_mode = 0
 
-[node name="BackgroundLayer" type="CanvasLayer" parent="."]
+[node name="BackgroundLayer" type="CanvasLayer" parent="." unique_id=265075425]
 layer = -1
 
-[node name="Background" type="ColorRect" parent="BackgroundLayer"]
+[node name="Background" type="ColorRect" parent="BackgroundLayer" unique_id=574983540]
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -20,52 +21,42 @@ grow_vertical = 2
 mouse_filter = 2
 color = Color(0.05, 0.05, 0.05, 1)
 
-[node name="Obstacles" type="Node2D" parent="."]
+[node name="Obstacles" type="Node2D" parent="." unique_id=1834554937]
 
-[node name="Obstacle1" type="ColorRect" parent="Obstacles"]
-offset_left = 576.0
-offset_top = 192.0
-offset_right = 640.0
-offset_bottom = 448.0
-mouse_filter = 2
-color = Color(0.3, 0.3, 0.3, 1)
-
-[node name="Obstacle2" type="ColorRect" parent="Obstacles"]
-offset_left = 384.0
-offset_top = 384.0
-offset_right = 512.0
-offset_bottom = 448.0
-mouse_filter = 2
-color = Color(0.3, 0.3, 0.3, 1)
-
-[node name="Ancestor" type="ColorRect" parent="."]
+[node name="Ancestor" type="Control" parent="." unique_id=654922628]
+layout_mode = 3
+anchors_preset = 0
 offset_left = 192.0
 offset_top = 256.0
 offset_right = 256.0
 offset_bottom = 320.0
 mouse_filter = 2
+script = ExtResource("2_portrait_frame")
 color = Color(0, 0.8, 1, 1)
 
-[node name="Descendant" type="ColorRect" parent="."]
+[node name="Descendant" type="Control" parent="." unique_id=1932395862]
+layout_mode = 3
+anchors_preset = 0
 offset_left = 896.0
 offset_top = 256.0
 offset_right = 960.0
 offset_bottom = 320.0
 mouse_filter = 2
+script = ExtResource("2_portrait_frame")
 color = Color(1, 0, 0.8, 1)
 
-[node name="Roots" type="Node2D" parent="."]
+[node name="Roots" type="Node2D" parent="." unique_id=345233298]
 
-[node name="RootLine" type="Line2D" parent="Roots"]
+[node name="RootLine" type="Line2D" parent="Roots" unique_id=1154331467]
 width = 12.0
 default_color = Color(1, 0.9, 0, 1)
 joint_mode = 2
 begin_cap_mode = 2
 end_cap_mode = 2
 
-[node name="UI" type="CanvasLayer" parent="."]
+[node name="UI" type="CanvasLayer" parent="." unique_id=1866554783]
 
-[node name="SapLabel" type="Label" parent="UI"]
+[node name="SapLabel" type="Label" parent="UI" unique_id=2024471399]
 offset_left = 32.0
 offset_top = 32.0
 offset_right = 150.0
@@ -73,7 +64,7 @@ offset_bottom = 66.0
 theme_override_font_sizes/font_size = 24
 text = "Savia: 100"
 
-[node name="GenerationLabel" type="Label" parent="UI"]
+[node name="GenerationLabel" type="Label" parent="UI" unique_id=459251273]
 offset_left = 32.0
 offset_top = 64.0
 offset_right = 150.0
@@ -81,7 +72,7 @@ offset_bottom = 98.0
 theme_override_font_sizes/font_size = 24
 text = "Generación: 1"
 
-[node name="MessageLabel" type="Label" parent="UI"]
+[node name="MessageLabel" type="Label" parent="UI" unique_id=60718989]
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5

@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dy35cx5b70o7"
-path="res://.godot/imported/man_head.png-18ddd0691840902e2f39adb58f6a91f4.ctex"
+uid="uid://blgwgtkelktox"
+path="res://.godot/imported/hombre.png-398237ddf2082886b32b7bc75cf91eb6.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/man_head.png"
-dest_files=["res://.godot/imported/man_head.png-18ddd0691840902e2f39adb58f6a91f4.ctex"]
+source_file="res://assets/hombre.png"
+dest_files=["res://.godot/imported/hombre.png-398237ddf2082886b32b7bc75cf91eb6.ctex"]
 
 [params]
 
