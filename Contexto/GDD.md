@@ -1,87 +1,72 @@
 # Documento de Diseño de Juego (GDD): Camino Ancestral (Ancestral Path)
 
+**Última Actualización:** Mayo 2026 (Versión Final de Compilación de la Jam)
 **Tema:** Connection (GameDev.tv Jam 2026)
-**Género:** Puzzle de Lógica / Conexión (2D)
-**Plataforma:** Web / PC (Godot Engine)
+**Género:** Puzzle de Lógica / Conexión Rítmica (2D)
+**Plataforma:** Web (HTML5) / PC (Godot Engine 4.6)
 
-## 1. Visión General: El Ciclo de la Vida
-El juego trata sobre la creación y expansión de un linaje a través de la conexión. Empezando con dos retratos (Hombre y Mujer), el jugador debe guiar sus raíces para que se encuentren y den vida a una nueva generación. El juego progresa verticalmente, donde el éxito de una generación se convierte en la base (y a veces el obstáculo) de la siguiente.
+---
 
-## 2. Mecánica Principal: El Desafío Lógico de la Raíz
-El núcleo del juego es un puzzle de navegación, optimización de recursos y toma de decisiones en tiempo real.
+## 1. Visión General: El Ciclo del Legado
+**Camino Ancestral** es un juego arcade/roguelike de conexión infinita y gestión de recursos donde el jugador guía la propagación de un árbol familiar generación tras generación.
 
-### 2.1. Gestión de la Savia (Energía)
-*   **Origen:** Cada pareja de retratos (Padre y Madre) comienza con una reserva base de Savia.
-*   **Consumo:** Extender la raíz por el escenario consume Savia de forma constante. Cada centímetro cuenta.
-*   **Recolección:** El jugador puede recargar Savia pasando por **Nodos de Nutrientes** (frutos/semillas) distribuidos por el mapa.
-*   **Dilema Lógico:** El jugador debe decidir si tomar la ruta más corta o desviarse para recoger nutrientes que aseguren la longevidad del linaje.
+Empezando con un retrato azul (Hombre) y un retrato rosa (Mujer), el jugador traza caminos de luz (raíces) sobre una cuadrícula bidimensional para que se conecten. Al unirse, la cámara se desplaza verticalmente, el linaje avanza y nace la siguiente generación, la cual debe usar los cimientos (e interceptar los peligros) de sus predecesores.
 
-### 2.2. Obstáculos y Peligros Dinámicos
-El escenario no es estático; el jugador debe reaccionar a amenazas en tiempo real:
-*   **La Plaga (Blight):** Nubes de esporas oscuras que se mueven por el mapa. Tocarlas drena la Savia rápidamente.
-*   **Raíces Parásitas:** Amenazas que intentan interceptar la raíz del jugador, obligando a maniobras de evasión.
-*   **Terreno Cambiante:** Rocas que se desplazan o grietas que se abren, alterando los caminos disponibles durante el trazado.
+---
 
-### 2.3. La Unión y el Legado
-*   Cuando las dos raíces se encuentran, ocurre una fusión visual y nace un **nuevo retrato (hijo)** en el punto de encuentro exacto.
+## 2. Mecánicas de Juego Reales (Fieles al Código)
 
-## 3. Dinámica de Múltiples Hijos y Generaciones
-*   **Crecimiento Vertical:** A medida que nacen nuevos hijos, la cámara se desplaza, dejando a los padres arriba.
-*   **Herencia Escénica:** Las raíces de las generaciones anteriores permanecen en el suelo, convirtiéndose en obstáculos físicos o guías estructurales para los nuevos puzzles.
-*   **Gestión de Espacio:** En niveles con múltiples hijos, el jugador debe gestionar varias raíces simultáneamente, evitando que se crucen o bloqueen, creando una red compleja de conexiones familiares.
-*   **Evolución de Rasgos:** Los nodos de nutrientes recogidos por los padres otorgan rasgos especiales a los hijos, permitiéndoles superar obstáculos específicos en niveles futuros (ej: raíces de fuego para quemar hielo).
+### 2.1. Trazado y Gestión de Raíces
+*   **Dibujar (Clic Izquierdo + Arrastrar):** El jugador extiende la raíz de luz de forma fluida por las celdas de la cuadrícula. Cada segmento de raíz trazado consume **Savia (Energía)**.
+*   **Borrar/Retraer (Clic Derecho):** Hacer clic derecho sobre la punta activa de la raíz deshace el camino de forma proporcional, devolviendo la savia consumida para permitir rectificar rutas.
+*   **Punta Dinámica de Búsqueda:** Cuando el jugador no está trazando activamente (`is_drawing == false`), la punta final de la raíz se orienta de forma orgánica y dinámica apuntando directamente hacia el cursor del ratón, imitando la búsqueda física de nutrientes.
 
-## 4. Final y Ciclo de Juego: El Linaje Eterno
-*   **Naturaleza:** El juego es de tipo **infinito (Arcade/Roguelike)**. No tiene un final definitivo, sino que el objetivo es ver cuántas generaciones puede sostener el jugador antes de que el linaje se extinga.
-*   **Condición de Derrota:** El juego termina si el jugador se queda sin "Savia" para realizar una conexión o si los obstáculos ambientales impiden que los descendientes encuentren pareja.
-*   **Renacimiento:** Al morir el árbol, las semillas se dispersan, permitiendo empezar un nuevo linaje (posiblemente con mejoras acumuladas).
+### 2.2. Gestión de la Savia (Recursos)
+*   **Consumo:** Cada paso por la cuadrícula cuesta savia. Si la savia se agota a 0 antes de realizar la unión, el juego termina.
+*   **💚 Corazón Verde (+1):** Recarga básica de `+1` de savia al pasar la raíz sobre él.
+*   **❤️ Corazón Rojo (+5):** Recargador premium de `+5` de savia. Al recogerlo, lanza una animación flotante y un pulso de escala neón gigante en el marcador de puntuación principal.
 
-## 5. Sistema de Puntuación y Ranking (Online)
-*   **Puntuación:** Se basa principalmente en el **Número de Generaciones** alcanzadas.
-*   **Multiplicadores:** Se obtienen puntos extra por la "Pureza" del linaje, el tiempo de resolución de cada puzzle y la cantidad de miembros de la familia despertados.
-*   **Conectividad:** Gracias al uso de un VPS propio, el juego contará con una **Tabla de Clasificación (Leaderboard)** global donde los jugadores podrán comparar la longevidad de sus árboles genealógicos.
+### 2.3. Control de Tiempo: El Reloj de Arena (⏳)
+*   **Reloj de Arena (+⏳ SLOW!):** Recoger un reloj de arena ralentiza significativamente el desplazamiento automático de la cámara y del escenario.
+*   **Sistema de Pilas (Stack x3):** Recoger múltiples relojes de forma consecutiva acumula pilas de tiempo de ralentización (hasta x3), extendiendo proporcionalmente la duración del efecto (6s para x1, 12s para x2, 18s para x3).
+*   **Interfaz de Progreso Neon:** El estado se muestra mediante un indicador circular premium en la esquina superior izquierda que dibuja un arco de progreso neon de color violeta que se vacía en tiempo real y muestra el multiplicador activo (ej: `x2` o `x3`).
 
-## 6. Estética y Estilo Visual: El "Brillo en la Oscuridad"
-Inspirado directamente por la estética de **Nidhogg (2014)**, el juego adoptará un estilo **Lo-Fi / Minimalista** de alto impacto visual.
+### 2.4. Obstáculos y Colisiones
+*   **Bloques Grises del Escenario:** Celdas rocosas que bloquean físicamente el paso de las raíces, obligando a trazar rutas de evasión.
+*   **Colisión de Caminos Ancestrales ($O(1)$ Hash Map):** Las raíces trazadas por las generaciones anteriores permanecen en el terreno como obstáculos infranqueables. Para garantizar un rendimiento óptimo de 60 FPS estables sin tirones, el juego utiliza una tabla hash (`_occupied_previous_points`) que comprueba la colisión de la nueva raíz contra miles de segmentos de generaciones previas en tiempo constante $O(1)$.
 
-*   **Minimalismo Extremo (Pixel Art Lo-Fi):** Los personajes no tendrán rostros detallados ni texturas complejas. Serán siluetas vibrantes y minimalistas (estilo Atari 2600 moderno). Esto permite que el jugador se centre en la fluidez del movimiento y en la red de conexiones.
-*   **Contraste y Color:**
-	*   **Fondos:** Serán oscuros, profundos o con patrones psicodélicos muy sutiles para generar atmósfera.
-	*   **Retratos:** Serán bloques de color sólido neón (ej: Hombre en azul eléctrico, Mujer en rosa vibrante).
-	*   **Savia/Raíces:** Líneas de luz pura (dorado/amarillo neón) que contrastan fuertemente con el fondo.
-*   **El "Rastro del Linaje":** Al igual que la sangre en Nidhogg, las raíces que el jugador extienda dejarán una **mancha de luz persistente**. Al final de muchas generaciones, el fondo oscuro estará "pintado" por los caminos que tomaron los ancestros, creando una obra de arte generativa única en cada partida.
-*   **Animación Fluida:** A pesar de la baja resolución de los sprites, las animaciones de las raíces al crecer y de los retratos al "fusionarse" serán extremadamente fluidas, dando una sensación orgánica y viva.
-*   **Envejecimiento Dinámico:** A medida que el linaje avanza y los retratos quedan en la parte superior de la pantalla (pasando a ser ancestros), estos deben "envejecer" visualmente.
-	*   **Efecto:** Se simulará el paso del tiempo mediante la aparición de líneas sutiles (oscuras o claras según el color base) que cruzan los rostros, representando arrugas o las vetas de la madera vieja. Esto refuerza la idea de que los cimientos del árbol son antiguos y sabios.
-*   **Monumentos de la Historia:** A medida que la cámara se desplaza hacia abajo con las nuevas generaciones, aparecerán en los márgenes laterales (izquierda y derecha) **estatuas de estilo griego y romano** (hombres y mujeres de piedra).
-	*   **Propósito:** Estos monumentos llevarán grabados **mensajes narrativos o de ánimo** que invitan al jugador a seguir profundizando en el linaje. Representan la "memoria de piedra" de la humanidad, dando una sensación de escala épica y trascendencia al progreso del jugador.
-*   **Ventaja de Producción:** Este estilo permite generar assets rápidamente durante la Jam, priorizando el "feeling" y la jugabilidad sobre el pulido gráfico tradicional.
+---
 
-## 7. Audio y Música: Atmósfera "Dark Gregorian Phonk"
-Inspirada en el estilo **Dark Gregorian Phonk** (ej: *Ave Maria | Dark Gregorian Phonk*), la banda sonora será una pieza fundamental para sumergir al jugador en el trance y la tensión de mantener vivo el árbol genealógico.
+## 3. Dinámica Generacional y Progresión Infinita
+*   **Crecimiento Vertical Infinito:** Cada unión exitosa desplaza la cámara y genera la nueva pareja en la parte inferior, haciendo del linaje una progresión infinita.
+*   **Envejecimiento Dinámico a Calavera (Morphing):** A medida que la cámara avanza, los retratos de las parejas de generaciones previas pasan a ser "Ancestros inactivos". Para representarlo:
+	*   El color de sus marcos neón se desvanece suavemente a un gris pétreo en 1.0 segundos.
+	*   Al volverse grises, se inicia una transición continua de *morphing* por desintegración de bloques digitales retro (mediante un Shader dedicado de canvas) que transforma de forma orgánica los retratos humanos en calaveras (`res://assets/calavera.png`).
+*   **Combo Arcade de Uniones:** Conectar generaciones de forma rápida y fluida incrementa un multiplicador neón arcade visible en la interfaz para potenciar la puntuación del jugador.
 
-*   **Estilo:** **Dark Gregorian Phonk**. Una poderosa fusión de música coral sacra o cantos gregorianos con una agresiva producción moderna de phonk/trap. Bajos muy pesados (808s saturados), percusión trap contundente, sintetizadores oscuros y efectos de glitch.
-*   **Atmósfera:** Oscura, mística, épica y profundamente dramática. Debe sentirse como un ritual sagrado antiguo colisionando con un ritmo frenético y pesado. La solemnidad melancólica de las voces corales contrasta perfectamente con la velocidad y urgencia puramente "Arcade" de conectar las raíces a tiempo.
-*   **Efectos de Sonido (SFX):** 
-	*   Percusiones secas y contundentes (estilo phonk cowbells o claps pesados) para marcar los ritmos de cada clic y confirmación de unión.
-	*   Ecos de cánticos corales o voces sagradas distorsionadas que resuenan cuando la cámara desciende y nace una nueva generación.
-	*   Sonidos de madera antigua crujiendo violentamente, acompañados de subgraves profundos, para la tensión de expandir o retraer rápidamente la raíz.
+---
 
-## 8. Lista de Assets (Tareas Pendientes)
+## 4. Estética y Estilo Visual: Neón en la Oscuridad
+El juego adopta un diseño minimalista premium inspirado en el minimalismo de *Nidhogg*:
 
-### Visuales (Imágenes)
-*   **Retratos Base:** Siluetas minimalistas en colores neón (Hombre, Mujer, Niño/Semilla).
-*   **Segmentos de Raíz:** Diferentes formas (Recta, en L, en T, Cruce) con versión apagada y versión brillante.
-*   **Nodos de Entorno:** Iconos para nutrientes (Fuerza, Sabiduría, etc.) y obstáculos (Rocas, Corrupción).
-*   **Fondos:** Capas de fondos oscuros con grano o ruido para profundidad.
-*   **Partículas:** Brillos para la "fusión" y el rastro de luz de las raíces.
-*   **Monumentos:** Estatuas pixeladas de estilo griego/romano para los laterales.
-*   **Interfaz (UI):** Contador de generaciones, barra de Savia (Energía) y botones de estilo retro.
+*   **Alto Contraste:** Fondos oscuros abisales (`#07060a`) que contrastan con los colores neón puro del juego: Hombre en azul eléctrico (`#00d2ff`), Mujer en rosa/fucsia vibrante (`#ff007f`) y raíces de savia en destellos dorados.
+*   **Interfaz de Emojis Reemplazada por PNGs:** Toda la UI del juego prescinde de emojis de texto que puedan romperse en navegadores web. En su lugar, se cargan directamente los assets oficiales Twemoji de alta resolución en componentes `TextureRect` y `HBoxContainer`:
+	*   `res://assets/icon_hourglass.png` (Relojes de arena e interfaz flotante `SLOW!`).
+	*   `res://assets/icon_heart_red.png` (Notificación flotante `+5` de savia).
+	*   `res://assets/icon_heart_green.png` (Notificación flotante `+1` de savia).
+	*   `res://assets/flag_es.png` y `res://assets/flag_uk.png` (Banderas físicas de selección de idioma).
 
-### Audio (Sonidos)
-*   **Música:** Bucle de atmósfera Witch House (Crystal Castles Style).
-*   **SFX Rotación:** Crujido de madera seca.
-*   **SFX Crecimiento:** Sonido de "siseo" o estática eléctrica al extender la raíz.
-*   **SFX Conexión:** Acorde sintético triunfal y armónico al unir dos raíces.
-*   **SFX Despertar:** Sonido de inhalación o latido cuando un retrato cobra vida.
-*   **SFX Fallo/Muerte:** Distorsión súbita (Glitch) y silencio.
+---
+
+## 5. Banda Sonora y Sincronización Rítmica (Phonk)
+La música y el sonido actúan como un elemento de juego interactivo en Camino Ancestral:
+
+*   **Dark Gregorian Phonk:** Banda sonora mística de trap y cantos gregorianos (`res://assets/music.ogg`) transcodificada a formato nativo OGG Vorbis para garantizar reproducción y decodificación fluida en navegadores HTML5.
+*   **Analizador de Espectro en Tiempo Real:** El juego cuenta con un bus de audio aislado (`"Music"`) que ejecuta un analizador de espectro dinámico (`AudioEffectSpectrumAnalyzer`). 
+*   **Latidos Sincronizados:** En cada golpe de bajo (beat) de la música, el analizador de espectro de audio hace latir físicamente la escala de los retratos activos de los padres, los nutrientes del mapa y la cuadrícula en tiempo de ejecución, sumergiendo al jugador en un trance rítmico total.
+*   **Desbloqueo de Audio Defensivo:** Para saltarse las políticas restrictivas de *Autoplay* de los navegadores web modernos (Chrome, Safari, Firefox), el juego desmutea y activa explícitamente los buses de sonido al primer clic de idioma del jugador.
+
+---
+
+## 6. Conectividad y Tablas de Clasificación Online
+*   **Leaderboard Online:** El juego integra un sistema de comunicación HTTP con un VPS propio del desarrollador, permitiendo registrar la puntuación y el linaje de los jugadores y mostrar en pantalla una tabla de clasificación global en tiempo real competitiva.

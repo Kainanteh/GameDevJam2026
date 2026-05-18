@@ -14,7 +14,9 @@ var game_over = false
 var generation = 1
 var waiting_for_next = false
 var camera_speed = 15.0 # Píxeles por segundo inicial
+var target_camera_speed = 15.0 # Velocidad objetivo para recuperación de ralentización (Reloj de Arena)
 var all_previous_paths: Array[Vector2] = [] # Almacenar raíces antiguas para colisiones
+var _occupied_previous_points: Dictionary = {} # Mapa de colisiones O(1) de raíces antiguas
 var is_retracting = false # Flag para la marcha atrás
 var last_beat_index = -1 # Índice para compás rítmico global
 
@@ -36,16 +38,21 @@ var _last_magnitude: float = 0.0
 @onready var camera = $MainCamera
 @onready var roots_container = $Roots
 
-var rewards_container: Node
+var rewards_container: Node2D
 var _music_player: AudioStreamPlayer
 var _generation_combo: Label
 var _green_score_label: Label
+var _mechanics_tutorial_panel: Panel # Panel de tutorial de mecánicas al inicio
+var _sap_tutorial_panel: Panel # Segundo panel de tutorial de savia y penalización
 var green_squares_collected: int = 0
+var displayed_green_score: int = 0 # Conteo visual real renderizado en el HUD
 
 var first_union_made = false
 var _tutorial_timer = 0.0
+var _seeking_bend_angle = 0.0
+var _seeking_delay_timer = 0.0
 var _tutorial_line: Line2D
-var _tutorial_cursor: Label
+var _tutorial_cursor: TextureRect
 
 var in_menu = true
 var _menu_node: Control
@@ -69,9 +76,16 @@ var _menu_beat_cooldown: float = 0.0
 var _title_beat_pulse: float = 0.0
 var _menu_average_delta: float = 0.0
 var _title_font: SystemFont
+var _body_font: SystemFont
 var _battery_bar: Control
 var _displayed_sap: float = 150.0
 var _battery_beat_pulse: float = 0.0
+
+# Variables de control y estado de la ralentización del Reloj de Arena (⏳)
+var _hourglass_ui: Control
+var hourglass_time_left: float = 0.0
+var hourglass_max_duration: float = 6.0
+var hourglass_stack: int = 0
 
 func _ready():
 	randomize()
@@ -79,7 +93,7 @@ func _ready():
 	# Inicializar el indicador de combo de generación neón en la esquina superior derecha
 	_setup_combo_ui()
 	
-	rewards_container = Node.new()
+	rewards_container = Node2D.new()
 	rewards_container.name = "Rewards"
 	add_child(rewards_container)
 	
@@ -94,7 +108,8 @@ func _ready():
 	descendant.hide()
 	
 	# Forzar que el contenedor de raíces (roots_container) se dibuje al principio
-	# de la jerarquía de Main (índice 2), quedando DETRÁS de todos los retratos y obstáculos
+	# de la jerarquía de Main (índice 2) y con z_index = -5, quedando DETRÁS de todos los retratos y obstáculos
+	roots_container.z_index = -5
 	move_child(roots_container, 2)
 	
 	# Inicializar elementos del tutorial visual si no se ha completado la primera unión
@@ -107,19 +122,20 @@ func _ready():
 	_tutorial_line.end_cap_mode = Line2D.LINE_CAP_ROUND
 	add_child(_tutorial_line)
 	
-	_tutorial_cursor = Label.new()
+	_tutorial_cursor = TextureRect.new()
 	_tutorial_cursor.name = "TutorialCursor"
-	_tutorial_cursor.text = "👉"
-	_tutorial_cursor.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_tutorial_cursor.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_tutorial_cursor.add_theme_font_size_override("font_size", 48)
-	_tutorial_cursor.pivot_offset = Vector2(24, 24)
+	_tutorial_cursor.texture = load("res://assets/icon_arrow_yellow.png")
+	_tutorial_cursor.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_tutorial_cursor.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_tutorial_cursor.custom_minimum_size = Vector2(36, 36)
+	_tutorial_cursor.size = Vector2(36, 36)
+	_tutorial_cursor.pivot_offset = Vector2(18, 18)
 	add_child(_tutorial_cursor)
 	
 	# Centrar los recuadros originales para que no se desplacen raro al crecer
 	ancestor.position -= Vector2(GRID_SIZE, GRID_SIZE)
 	descendant.position -= Vector2(GRID_SIZE, GRID_SIZE)
-	_tutorial_cursor.position = (ancestor.position + ancestor.size / 2.0) - Vector2(24, 24)
+	_tutorial_cursor.position = (ancestor.position + ancestor.size / 2.0) - Vector2(18, 24)
 	
 	root_line.width = GRID_SIZE * 0.4
 	
@@ -136,6 +152,8 @@ func _ready():
 	_music_player = AudioStreamPlayer.new()
 	_music_player.name = "BackgroundMusic"
 	_music_player.bus = "Master"
+	if "playback_type" in _music_player:
+		_music_player.set("playback_type", 0) # Forzar reproducción tipo Stream (0) en Godot 4.3+
 	add_child(_music_player)
 	_play_music()
 	
@@ -229,14 +247,84 @@ func _process(delta):
 			
 	# Procesamiento continuo de dibujo o retracción
 	if is_drawing:
+		_seeking_delay_timer = 0.5
+		_seeking_bend_angle = 0.0
 		try_add_point(get_global_mouse_position())
 	elif is_retracting:
+		_seeking_delay_timer = 0.5
+		_seeking_bend_angle = 0.0
 		retract_root()
+	else:
+		# Si no está dibujando ni borrando, hacer que la punta de la raíz busque orgánicamente al cursor
+		if not in_menu and not game_over and not waiting_for_next:
+			_seeking_delay_timer = max(0.0, _seeking_delay_timer - delta)
+			_update_seeking_tip(delta)
+	# Procesar el temporizador del Reloj de Arena (⏳) y su velocidad ralentizada
+	if hourglass_time_left > 0.0:
+		hourglass_time_left = max(0.0, hourglass_time_left - delta)
 		
+		if hourglass_time_left <= 0.0:
+			hourglass_stack = 0
+			
+		# Actualizar el texto del multiplicador
+		if _hourglass_ui:
+			var mult_lbl = _hourglass_ui.find_child("MultiplierLabel", true, false)
+			if mult_lbl:
+				if hourglass_stack >= 2:
+					mult_lbl.text = "x" + str(hourglass_stack)
+					mult_lbl.show()
+				else:
+					mult_lbl.hide()
+			
+			_hourglass_ui.queue_redraw()
+			
+			# Animación de Entrada Elástica
+			if not _hourglass_ui.visible:
+				_hourglass_ui.show()
+				var t_show = create_tween().set_parallel(true)
+				t_show.tween_property(_hourglass_ui, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+				t_show.tween_property(_hourglass_ui, "modulate:a", 1.0, 0.3).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		
+		# Ajustar velocidad ralentizada según la pila (x1 = 60%, x2 = 40%, x3 = 25%)
+		var slow_factor = 0.6
+		if hourglass_stack == 2:
+			slow_factor = 0.4
+		elif hourglass_stack >= 3:
+			slow_factor = 0.25
+			
+		var target_slow_speed = max(10.0, target_camera_speed * slow_factor)
+		camera_speed = lerp(camera_speed, target_slow_speed, 1.0 - exp(-4.0 * delta))
+	else:
+		if _hourglass_ui and _hourglass_ui.visible and _hourglass_ui.scale.x > 0.0:
+			# Animación de Salida Elástica
+			var t_hide = create_tween().set_parallel(true)
+			t_hide.tween_property(_hourglass_ui, "scale", Vector2.ZERO, 0.4).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+			t_hide.tween_property(_hourglass_ui, "modulate:a", 0.0, 0.3).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+			t_hide.chain().tween_callback(_hourglass_ui.hide)
+			
+		# Recuperación progresiva original de la velocidad
+		if camera_speed < target_camera_speed:
+			camera_speed = lerp(camera_speed, target_camera_speed, 1.0 - exp(-0.6 * delta))
+			if target_camera_speed - camera_speed < 0.2:
+				camera_speed = target_camera_speed
+
 	if not waiting_for_next and first_union_made:
 		# Mover cámara implacablemente hacia abajo
 		camera.position.y += camera_speed * delta
 		
+	# Interpolación de escala súper optimizada de obstáculos y recompensas (evita lags en WebGL)
+	if not in_menu:
+		for obs in obstacles.get_children():
+			if obs.scale != Vector2.ONE:
+				obs.scale = obs.scale.lerp(Vector2.ONE, 1.0 - exp(-15.0 * delta))
+				if obs.scale.distance_to(Vector2.ONE) < 0.005:
+					obs.scale = Vector2.ONE
+		for rew in rewards_container.get_children():
+			if rew.scale != Vector2.ONE:
+				rew.scale = rew.scale.lerp(Vector2.ONE, 1.0 - exp(-15.0 * delta))
+				if rew.scale.distance_to(Vector2.ONE) < 0.005:
+					rew.scale = Vector2.ONE
+					
 	# Bucle de la primera parte de la intro musical (primeros 8s) antes de la primera unión
 	if _music_player and _music_player.playing and not first_union_made:
 		if _music_player.get_playback_position() >= 8.0:
@@ -258,7 +346,7 @@ func _process(delta):
 			# Interpolar de forma suave
 			t = sin(t * PI / 2.0)
 			var current_pos = ancestor_center.lerp(descendant_center, t)
-			_tutorial_cursor.position = current_pos - Vector2(24, 24)
+			_tutorial_cursor.position = current_pos - Vector2(18, 24)
 			_tutorial_cursor.show()
 			_tutorial_cursor.modulate.a = 0.8
 			_tutorial_cursor.scale = Vector2.ONE
@@ -269,7 +357,7 @@ func _process(delta):
 			_tutorial_line.modulate.a = 0.4
 		elif phase_time < 2.5:
 			# Fase 2: Mantener y simular click/pulso (1.5s a 2.5s)
-			_tutorial_cursor.position = descendant_center - Vector2(24, 24)
+			_tutorial_cursor.position = descendant_center - Vector2(18, 24)
 			var pulse = 1.0 + sin((phase_time - 1.5) * 15.0) * 0.15
 			_tutorial_cursor.scale = Vector2(pulse, pulse)
 			_tutorial_line.clear_points()
@@ -328,6 +416,60 @@ func _process(delta):
 			last_beat_index = current_beat
 			_trigger_real_beat()
 
+func _update_seeking_tip(delta):
+	if current_path.size() == 0:
+		return
+		
+	var points_with_tip = current_path.duplicate()
+	var last_pt = current_path[-1]
+	var mouse_pos = get_global_mouse_position()
+	var to_mouse = mouse_pos - last_pt
+	var dist_to_mouse = to_mouse.length()
+	
+	var dir = Vector2.DOWN
+	if current_path.size() >= 2:
+		dir = (current_path[-1] - current_path[-2]).normalized()
+	if dir == Vector2.ZERO:
+		dir = Vector2.DOWN
+		
+	var dir_to_mouse = dir
+	if dist_to_mouse >= 2.0:
+		dir_to_mouse = to_mouse.normalized()
+		
+	var angle_line = dir.angle()
+	var angle_mouse = dir_to_mouse.angle()
+	var angle_diff = angle_difference(angle_line, angle_mouse)
+	
+	# Limitar el ángulo de la curva a un máximo de 60 grados para evitar giros imposibles/bucles 360
+	var max_bend_angle = deg_to_rad(60.0)
+	var clamped_diff = clamp(angle_diff, -max_bend_angle, max_bend_angle)
+	
+	# Si el temporizador de retraso de 0.5 segundos sigue activo, el objetivo es 0.0 (permanecer recta)
+	var target_diff = 0.0
+	if _seeking_delay_timer <= 0.0:
+		target_diff = clamped_diff
+		
+	# Interpolar la desviación angular de forma pausada y extremadamente orgánica (simulando inercia/vida en la planta)
+	# Un factor de 1.0 da una lentitud súper fluida, pausada e hipnótica, como si costara mover el filamento vegetal
+	_seeking_bend_angle = lerp(_seeking_bend_angle, target_diff, 1.0 - exp(-1.0 * delta))
+	
+	# Colita con longitud constante de 32.0 píxeles, garantizando que NUNCA se encoja o retraiga al acercarse
+	var actual_tip_len = 32.0
+	var num_segments = 6
+	var segment_len = actual_tip_len / num_segments
+	
+	var current_pt = last_pt
+	for i in range(1, num_segments + 1):
+		var t = float(i) / num_segments
+		var blend = t * (2.0 - t) # Curvatura de salida súper orgánica
+		var current_angle = angle_line + _seeking_bend_angle * blend
+		
+		var offset = Vector2(cos(current_angle), sin(current_angle)) * segment_len
+		current_pt += offset
+		points_with_tip.append(current_pt)
+		
+	root_line.points = points_with_tip
+
 func _trigger_real_beat() -> void:
 	# 1. Expandir y cabecear todos los retratos en la escena (los inactivos solo pulsan su marco)
 	for node in get_children():
@@ -363,8 +505,6 @@ func trigger_global_beat_pulse() -> void:
 			continue
 		obs.pivot_offset = obs.size / 2.0
 		obs.scale = Vector2(1.15, 1.15) # Exagerado: Crece un 15%
-		var t = create_tween()
-		t.tween_property(obs, "scale", Vector2.ONE, 0.25).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		
 	# 2. Pulsar recompensas verdes (ColorRects en rewards_container)
 	for rew in rewards_container.get_children():
@@ -372,8 +512,6 @@ func trigger_global_beat_pulse() -> void:
 			continue
 		rew.pivot_offset = rew.size / 2.0
 		rew.scale = Vector2(1.28, 1.28) # Exagerado: Crece un 28% (súper jugoso)
-		var t = create_tween()
-		t.tween_property(rew, "scale", Vector2.ONE, 0.25).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 func retract_root():
 	if game_over or waiting_for_next:
@@ -481,10 +619,9 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 	if is_colliding_with_obstacle(grid_pos):
 		return false
 		
-	# Comprobar si choca con raíces antiguas
-	for old_point in all_previous_paths:
-		if old_point.distance_to(grid_pos) < 5:
-			return false
+	# Comprobar si choca con raíces antiguas en tiempo constante O(1)
+	if _occupied_previous_points.has(grid_pos):
+		return false
 			
 	for point in current_path:
 		if point.distance_to(grid_pos) < 5:
@@ -498,15 +635,146 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 	for reward in rewards_container.get_children():
 		var reward_center = reward.position + reward.size / 2.0
 		if grid_pos.distance_to(reward_center) < GRID_SIZE / 2.0:
+			if reward.has_meta("type") and reward.get_meta("type") == "hourglass":
+				# Incrementar la pila de ralentización (máximo x3)
+				hourglass_stack = min(3, hourglass_stack + 1)
+				# Reiniciar el temporizador al máximo de la pila actual (6s para x1, 12s para x2, 18s para x3)
+				hourglass_time_left = hourglass_max_duration * hourglass_stack
+				
+				# Crear un flotador de texto y textura neón morado/violeta ("⏳ ¡LENTO!")
+				var slow_lbl = HBoxContainer.new()
+				slow_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
+				slow_lbl.position = reward.position - Vector2(32, 24)
+				slow_lbl.size = Vector2(100, 32)
+				slow_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				
+				var icon_tex = TextureRect.new()
+				icon_tex.texture = load("res://assets/icon_hourglass.png")
+				icon_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				icon_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				icon_tex.custom_minimum_size = Vector2(20, 20)
+				slow_lbl.add_child(icon_tex)
+				
+				var text_node = Label.new()
+				text_node.text = " SLOW!" if current_language == "en" else " ¡LENTO!"
+				text_node.add_theme_font_size_override("font_size", 18)
+				text_node.add_theme_color_override("font_color", Color(0.85, 0.55, 1.0, 1.0))
+				text_node.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+				text_node.add_theme_constant_override("outline_size", 6)
+				slow_lbl.add_child(text_node)
+				
+				add_child(slow_lbl)
+				
+				var t_lbl = create_tween().set_parallel(true)
+				t_lbl.tween_property(slow_lbl, "position:y", slow_lbl.position.y - 48.0, 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				t_lbl.tween_property(slow_lbl, "modulate:a", 0.0, 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN).set_delay(0.2)
+				t_lbl.chain().tween_callback(slow_lbl.queue_free)
+				
+				reward.queue_free()
+				continue
+				
+			if reward.has_meta("type") and reward.get_meta("type") == "red_heart":
+				sap += 5
+				green_squares_collected += 5
+				
+				# Crear y animar el "+5 ❤️" volador en la capa de la UI
+				var flying_lbl = HBoxContainer.new()
+				flying_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
+				flying_lbl.position = reward.global_position - camera.position - Vector2(32, 12)
+				flying_lbl.size = Vector2(80, 28)
+				flying_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				
+				var text_node = Label.new()
+				text_node.text = "+5 "
+				text_node.add_theme_font_size_override("font_size", 20)
+				text_node.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3, 1.0))
+				text_node.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+				text_node.add_theme_constant_override("outline_size", 6)
+				flying_lbl.add_child(text_node)
+				
+				var icon_tex = TextureRect.new()
+				icon_tex.texture = load("res://assets/icon_heart_red.png")
+				icon_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				icon_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				icon_tex.custom_minimum_size = Vector2(20, 20)
+				flying_lbl.add_child(icon_tex)
+				
+				$UI.add_child(flying_lbl)
+				
+				var target_pos = _green_score_label.position + Vector2(130, 12) if _green_score_label else Vector2.ZERO
+				
+				var t_fly = create_tween().set_parallel(true)
+				t_fly.tween_property(flying_lbl, "position", target_pos, 0.8).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+				t_fly.tween_property(flying_lbl, "scale", Vector2(0.6, 0.6), 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+				
+				t_fly.chain().tween_callback(func():
+					flying_lbl.queue_free()
+					
+					# Incrementar el marcador visual AHORA que ha impactado visualmente
+					displayed_green_score += 5
+					
+					# Feedback jugoso en el contador principal al impactar
+					if _green_score_label:
+						_green_score_label.text = str(displayed_green_score)
+						_green_score_label.scale = Vector2(1.5, 1.5) # Rebote más grande porque es +5!
+						_green_score_label.modulate = Color(2.2, 1.2, 1.2, 1.0) # Destello rojo neón vibrante!
+						var t_pulse = create_tween().set_parallel(true)
+						t_pulse.tween_property(_green_score_label, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+						t_pulse.tween_property(_green_score_label, "modulate", Color.WHITE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				)
+				
+				reward.queue_free()
+				continue
+				
 			sap += 1
 			green_squares_collected += 1
-			if _green_score_label:
-				_green_score_label.text = str(green_squares_collected)
-				_green_score_label.scale = Vector2(1.3, 1.3)
-				_green_score_label.modulate = Color(1.5, 2.2, 1.5, 1.0) # Súper destello neón verde
-				var t = create_tween().set_parallel(true)
-				t.tween_property(_green_score_label, "scale", Vector2.ONE, 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-				t.tween_property(_green_score_label, "modulate", Color.WHITE, 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			
+			# Crear y animar el "+1 💚" volador en la capa de la UI
+			var flying_lbl = HBoxContainer.new()
+			flying_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
+			flying_lbl.position = reward.global_position - camera.position - Vector2(32, 12)
+			flying_lbl.size = Vector2(64, 24)
+			flying_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			
+			var text_node = Label.new()
+			text_node.text = "+1 "
+			text_node.add_theme_font_size_override("font_size", 18)
+			text_node.add_theme_color_override("font_color", Color(0.1, 0.9, 0.1, 1.0))
+			text_node.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+			text_node.add_theme_constant_override("outline_size", 6)
+			flying_lbl.add_child(text_node)
+			
+			var icon_tex = TextureRect.new()
+			icon_tex.texture = load("res://assets/icon_heart_green.png")
+			icon_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			icon_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			icon_tex.custom_minimum_size = Vector2(18, 18)
+			flying_lbl.add_child(icon_tex)
+			
+			$UI.add_child(flying_lbl)
+			
+			var target_pos = _green_score_label.position + Vector2(130, 12) if _green_score_label else Vector2.ZERO
+			
+			var t_fly = create_tween().set_parallel(true)
+			t_fly.tween_property(flying_lbl, "position", target_pos, 0.8).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+			t_fly.tween_property(flying_lbl, "scale", Vector2(0.6, 0.6), 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+			
+			t_fly.chain().tween_callback(func():
+				flying_lbl.queue_free()
+				
+				# Incrementar el marcador visual en el momento exacto del impacto
+				displayed_green_score += 1
+				
+				# Feedback jugoso en el contador principal al impactar
+				if _green_score_label:
+					_green_score_label.text = str(displayed_green_score)
+					_green_score_label.scale = Vector2(1.3, 1.3)
+					_green_score_label.modulate = Color(1.5, 2.2, 1.5, 1.0) # Destello neón verde
+					var t_pulse = create_tween().set_parallel(true)
+					t_pulse.tween_property(_green_score_label, "scale", Vector2.ONE, 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+					t_pulse.tween_property(_green_score_label, "modulate", Color.WHITE, 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			)
+			
 			reward.queue_free()
 			
 	update_ui()
@@ -581,17 +849,41 @@ func update_ui():
 	if _generation_combo:
 		_generation_combo.text = "x" + str(generation) + "!"
 	if _green_score_label:
-		_green_score_label.text = str(green_squares_collected)
+		_green_score_label.text = str(displayed_green_score)
 
 func trigger_game_over(win: bool, out_of_bounds: bool = false):
 	is_drawing = false # <--- FIX: Cortar el dibujo activo inmediatamente
 	is_retracting = false
 	
 	if win:
-		camera_speed += 5.0 # Acelerar un poco la cámara con cada victoria
+		# Preservar el ratio de ralentización del reloj de arena si está activo
+		var slow_ratio = 1.0
+		if target_camera_speed > 0.0:
+			slow_ratio = camera_speed / target_camera_speed
+			
+		target_camera_speed += 5.0 # Acelerar la velocidad objetivo con cada victoria
+		
+		# Mantener el efecto de tiempo lento de forma fluida en la nueva generación
+		camera_speed = target_camera_speed * slow_ratio
+		
 		start_next_generation()
 	else:
 		game_over = true
+		_displayed_sap = 0.0
+		if _battery_bar:
+			_battery_bar.queue_redraw()
+			
+		# Ocultar todos los elementos de gameplay del mundo para dejar la pantalla de derrota 100% limpia y aislada
+		if roots_container:
+			roots_container.hide()
+		if obstacles:
+			obstacles.hide()
+		if rewards_container:
+			rewards_container.hide()
+		if ancestor:
+			ancestor.hide()
+		if descendant:
+			descendant.hide()
 		
 		# Ocultar cualquier texto plano viejo
 		if message_label:
@@ -607,16 +899,33 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 			var score_lbl = _classification_area.find_child("ScoreLabel", true, false)
 			if score_lbl:
 				var final_score = green_squares_collected * generation
-				score_lbl.text = "PUNTUACIÓN: " + str(final_score) + "\n(Savia: " + str(green_squares_collected) + " × Gen: " + str(generation) + ")"
+				if current_language == "en":
+					score_lbl.text = "SCORE: " + str(final_score) + "\n(Points: " + str(green_squares_collected) + " × Gen: " + str(generation) + ")"
+				else:
+					score_lbl.text = "PUNTUACIÓN: " + str(final_score) + "\n(Puntos: " + str(green_squares_collected) + " × Gen: " + str(generation) + ")"
 				
-			# Posicionar exactamente un alto de pantalla por debajo de la cámara actual
-			_classification_area.position = Vector2(0, camera.position.y + 648.0)
+			# Posicionar por debajo de la cámara actual con holgura extra (+700.0) para ocultar restos del gameplay
+			_classification_area.position = Vector2(0, camera.position.y + 700.0)
 			_classification_area.modulate.a = 0.0
 			_classification_area.show()
 			
 			var t = create_tween().set_parallel(true)
-			t.tween_property(camera, "position:y", camera.position.y + 648.0, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+			t.tween_property(camera, "position:y", camera.position.y + 700.0, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 			t.tween_property(_classification_area, "modulate:a", 1.0, 1.2).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			
+			# Animar el desvanecimiento elegante de la UI de juego para que no flote en la clasificación
+			if _battery_bar:
+				t.tween_property(_battery_bar, "scale", Vector2.ZERO, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				t.tween_property(_battery_bar, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			if _hourglass_ui:
+				t.tween_property(_hourglass_ui, "scale", Vector2.ZERO, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				t.tween_property(_hourglass_ui, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			if _generation_combo:
+				t.tween_property(_generation_combo, "scale", Vector2.ZERO, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				t.tween_property(_generation_combo, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			if _green_score_label:
+				t.tween_property(_green_score_label, "scale", Vector2.ZERO, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				t.tween_property(_green_score_label, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 func start_next_generation():
 	waiting_for_next = false
@@ -646,26 +955,31 @@ func start_next_generation():
 		if _tutorial_cursor:
 			_tutorial_cursor.queue_free()
 			_tutorial_cursor = null
+		if _mechanics_tutorial_panel:
+			var t_panel = create_tween()
+			t_panel.set_parallel(true)
+			t_panel.tween_property(_mechanics_tutorial_panel, "modulate:a", 0.0, 0.4).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+			t_panel.tween_property(_mechanics_tutorial_panel, "position:y", _mechanics_tutorial_panel.position.y + 50.0, 0.4).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+			t_panel.chain().tween_callback(_mechanics_tutorial_panel.queue_free)
+			_mechanics_tutorial_panel = null
+		if _sap_tutorial_panel:
+			var t_sap = create_tween()
+			t_sap.set_parallel(true)
+			t_sap.tween_property(_sap_tutorial_panel, "modulate:a", 0.0, 0.4).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+			t_sap.tween_property(_sap_tutorial_panel, "position:y", _sap_tutorial_panel.position.y + 50.0, 0.4).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+			t_sap.chain().tween_callback(_sap_tutorial_panel.queue_free)
+			_sap_tutorial_panel = null
 			
 	# Guardar la ruta actual en el historial de colisiones
 	all_previous_paths.append_array(current_path)
+	for p in current_path:
+		_occupied_previous_points[p] = true
 	
-	# Cambiar color de raíces y retratos antiguos a un tono oscuro gradualmente usando un Tween
-	var tween = create_tween()
-	tween.set_parallel(true)
-	tween.tween_property(root_line, "default_color", Color(0.6, 0.5, 0, 1), 1.0)
-	tween.tween_property(ancestor, "color", ancestor.color.darkened(0.5), 1.0)
-	tween.tween_property(descendant, "color", descendant.color.darkened(0.5), 1.0)
-	
-	# Desactivar animaciones (respiración y cabeceo) de los padres que acaban de pasar a la historia
-	ancestor.active = false
-	descendant.active = false
-	
+	# --- CÁLCULO DE branch_point Y child_grid_center AL INICIO ---
 	var current_y = descendant.position.y
 	var mid_x = (ancestor.position.x + descendant.position.x) / 2.0
 	
-	# 1. Encontrar el punto de la ruta más cercano al CENTRO HORIZONTAL entre los padres.
-	# Si la ruta cruza el centro varias veces, elegimos la pasada que esté más profunda (mayor Y)
+	# Encontrar el punto de la ruta más cercano al CENTRO HORIZONTAL entre los padres.
 	var branch_point = current_path[0]
 	var min_dist_to_center = 999999.0
 	var local_max_y = -999999.0
@@ -681,8 +995,7 @@ func start_next_generation():
 				local_max_y = p.y
 				branch_point = p
 				
-	# 2. Encontrar la profundidad MÁXIMA ABSOLUTA de toda la ruta para garantizar que el nuevo hijo
-	# aparezca por debajo de cualquier curva profunda que el jugador haya hecho buscando recompensas.
+	# Encontrar la profundidad MÁXIMA ABSOLUTA de toda la ruta para el nuevo hijo
 	var absolute_max_y = current_path[0].y
 	for p in current_path:
 		if p.y > absolute_max_y:
@@ -690,6 +1003,61 @@ func start_next_generation():
 	
 	# Instanciar al Hijo (alineado al centro y por debajo del todo)
 	var child_grid_center = get_grid_pos(Vector2(branch_point.x, absolute_max_y + 6 * GRID_SIZE))
+	# -------------------------------------------------------------
+	
+	# 1. Encontrar el índice del branch_point en el camino
+	var branch_idx = 0
+	var min_dist = 99999.0
+	for idx in range(current_path.size()):
+		var d = current_path[idx].distance_to(branch_point)
+		if d < min_dist:
+			min_dist = d
+			branch_idx = idx
+			
+	# Dividir en dos caminos que nacen en los padres y terminan en el branch_point
+	var path1 = current_path.slice(0, branch_idx + 1)
+	var path2 = current_path.slice(branch_idx, current_path.size())
+	path2.reverse() # Invertir para que crezca desde el descendiente hacia el branch
+	
+	# Crear las dos hélices horizontales
+	var helix1 = create_wrapping_helix(path1)
+	var helix2 = create_wrapping_helix(path2)
+	roots_container.add_child(helix1)
+	roots_container.add_child(helix2)
+	
+	var full_p1 = helix1.points
+	var full_p2 = helix2.points
+	helix1.points = []
+	helix2.points = []
+	
+	# Cambiar color de raíces y retratos antiguos a un tono oscuro gradualmente usando un Tween
+	var tween = create_tween()
+	tween.set_parallel(true)
+	# La línea pasa a un tono amarillo dorado atenuado y semi-transparente
+	tween.tween_property(root_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
+	tween.tween_property(ancestor, "color", ancestor.color.darkened(0.5), 1.0)
+	tween.tween_property(descendant, "color", descendant.color.darkened(0.5), 1.0)
+	
+	# Fase 1: Animar el crecimiento físico simultáneo desde ambos padres al branch_point (1.0s)
+	if full_p1.size() > 0:
+		tween.tween_method(func(pct: float):
+			var count = int(pct * full_p1.size())
+			helix1.points = full_p1.slice(0, count)
+		, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		
+	if full_p2.size() > 0:
+		tween.tween_method(func(pct: float):
+			var count = int(pct * full_p2.size())
+			helix2.points = full_p2.slice(0, count)
+		, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		
+	# Hacer crecer los pinchitos/espinas físicas en los caminos horizontales al paso de la espiral
+	spawn_growing_thorns(path1, 0.0, 1.0)
+	spawn_growing_thorns(path2, 0.0, 1.0)
+	
+	# Desactivar animaciones (respiración y cabeceo) de los padres que acaban de pasar a la historia
+	ancestor.active = false
+	descendant.active = false
 	
 	var child = PortraitFrame.new()
 	child.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
@@ -712,10 +1080,28 @@ func start_next_generation():
 	var descent_line = Line2D.new()
 	descent_line.width = GRID_SIZE * 0.4
 	descent_line.default_color = Color(1, 0.9, 0, 1) # Nace brillante
-	tween.tween_property(descent_line, "default_color", Color(0.6, 0.5, 0, 1), 1.0) # Y se apaga con el resto
 	descent_line.add_point(branch_point)
 	descent_line.add_point(child_grid_center)
 	roots_container.add_child(descent_line)
+	
+	# 2. Enroscar hélice en la línea de bajada también
+	var descent_helix = create_wrapping_helix([branch_point, child_grid_center])
+	roots_container.add_child(descent_helix)
+	
+	var descent_full_points = descent_helix.points
+	descent_helix.points = []
+	
+	tween.tween_property(descent_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
+	
+	# Fase 2: Animar el crecimiento progresivo de la hélice vertical (desde el branch_point hacia el hijo) tras el encuentro (delay 1.0s)
+	if descent_full_points.size() > 0:
+		tween.tween_method(func(pct: float):
+			var count = int(pct * descent_full_points.size())
+			descent_helix.points = descent_full_points.slice(0, count)
+		, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT).set_delay(1.0)
+		
+	# Hacer crecer los pinchitos/espinas físicas en el camino vertical descendente
+	spawn_growing_thorns([branch_point, child_grid_center], 1.0, 1.0)
 	
 	# Añadir la línea vertical al historial de colisiones antiguas y destruir obstáculos en su camino
 	var start_y_grid = int(branch_point.y / GRID_SIZE)
@@ -727,6 +1113,7 @@ func start_next_generation():
 	for y in range(start_y_grid, end_y_grid - 1):
 		var pos = get_grid_pos(Vector2(branch_x_grid * GRID_SIZE, y * GRID_SIZE))
 		all_previous_paths.append(pos)
+		_occupied_previous_points[pos] = true
 	# Instanciar a la nueva Pareja (ya no en la misma línea estricta)
 	var new_partner = PortraitFrame.new()
 	new_partner.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
@@ -891,18 +1278,171 @@ func start_next_generation():
 				if is_overlapping_editor_block:
 					continue
 					
-				var reward = ColorRect.new()
-				# Recompensa más pequeña para distinguirla
-				reward.size = Vector2(GRID_SIZE * 0.6, GRID_SIZE * 0.6)
-				reward.position = Vector2(cell.x * GRID_SIZE + GRID_SIZE * 0.2, cell.y * GRID_SIZE + GRID_SIZE * 0.2)
-				reward.color = Color(0.1, 0.9, 0.1, 1) # Verde fosforito
+				var reward = Panel.new()
+				reward.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
+				reward.position = Vector2(cell.x * GRID_SIZE + GRID_SIZE * 0.15, cell.y * GRID_SIZE + GRID_SIZE * 0.15)
+				reward.set_meta("type", "heart")
+				
+				var style = StyleBoxFlat.new()
+				style.bg_color = Color(0.02, 0.15, 0.05, 1.0) # Fondo verde bosque oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(0.1, 0.9, 0.1, 1.0) # Borde verde neón brillante
+				style.shadow_color = Color(0.1, 0.9, 0.1, 0.4) # Brillo neón verde
+				style.shadow_size = 6
+				reward.add_theme_stylebox_override("panel", style)
+				
+				var icon_rect = TextureRect.new()
+				icon_rect.texture = load("res://assets/icon_heart_green.png")
+				icon_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+				icon_rect.grow_horizontal = Control.GROW_DIRECTION_BOTH
+				icon_rect.grow_vertical = Control.GROW_DIRECTION_BOTH
+				icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				icon_rect.offset_left = 4
+				icon_rect.offset_right = -4
+				icon_rect.offset_top = 4
+				icon_rect.offset_bottom = -4
+				reward.add_child(icon_rect)
+				
 				reward.mouse_filter = Control.MOUSE_FILTER_IGNORE
 				reward.pivot_offset = reward.size / 2.0
 				reward.scale = Vector2.ZERO
 				rewards_container.add_child(reward)
+				
 				var t = create_tween()
 				t.tween_property(reward, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(randf_range(0.0, 0.3))
 				astar.set_point_solid(cell, true) # Evitar que salgan dos recompensas en la misma celda
+				
+	# === SPARK: PROCEDURAL HOURGLASS (RELOJ DE ARENA - 20% DE PROBABILIDAD) ===
+	if randf() < 0.2:
+		for attempt in range(30):
+			var rx = randi_range(2, max_grid_x - 3)
+			var ry = randi_range(top_y + 1, bottom_y - 1)
+			var cell = Vector2i(rx, ry)
+			
+			# Comprobar cajas seguras 5x5 de hijo y pareja
+			var in_child_box = abs(cell.x - child_coord.x) <= 2 and abs(cell.y - child_coord.y) <= 2
+			var in_partner_box = abs(cell.x - partner_coord.x) <= 2 and abs(cell.y - partner_coord.y) <= 2
+			if in_child_box or in_partner_box:
+				continue
+				
+			# Evitar solapamiento con la línea de descenso y su zona de borrado física
+			var cell_rect = Rect2(Vector2(cell.x * GRID_SIZE, cell.y * GRID_SIZE), Vector2(GRID_SIZE, GRID_SIZE))
+			if cell_rect.intersects(line_clear_rect):
+				continue
+				
+			# Evitar solapar con obstáculos o con savia verde
+			if astar.is_point_solid(cell):
+				continue
+				
+			# Asegurar accesibilidad física por raíces
+			if astar.get_id_path(child_coord, cell).size() > 0:
+				var hourglass = Panel.new()
+				hourglass.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
+				hourglass.position = Vector2(cell.x * GRID_SIZE + GRID_SIZE * 0.15, cell.y * GRID_SIZE + GRID_SIZE * 0.15)
+				hourglass.set_meta("type", "hourglass")
+				
+				var style = StyleBoxFlat.new()
+				style.bg_color = Color(0.12, 0.05, 0.22, 1.0) # Fondo índigo oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(0.75, 0.35, 1.0, 1.0) # Borde violeta neón
+				style.shadow_color = Color(0.75, 0.35, 1.0, 0.45) # Brillo violeta neón
+				style.shadow_size = 6
+				hourglass.add_theme_stylebox_override("panel", style)
+				
+				var icon_rect = TextureRect.new()
+				icon_rect.texture = load("res://assets/icon_hourglass.png")
+				icon_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+				icon_rect.grow_horizontal = Control.GROW_DIRECTION_BOTH
+				icon_rect.grow_vertical = Control.GROW_DIRECTION_BOTH
+				icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				icon_rect.offset_left = 4
+				icon_rect.offset_right = -4
+				icon_rect.offset_top = 4
+				icon_rect.offset_bottom = -4
+				hourglass.add_child(icon_rect)
+				
+				hourglass.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				hourglass.pivot_offset = hourglass.size / 2.0
+				hourglass.scale = Vector2.ZERO
+				rewards_container.add_child(hourglass)
+				
+				var t_glass = create_tween()
+				t_glass.tween_property(hourglass, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+				
+				astar.set_point_solid(cell, true)
+				break
+				
+	# === SPARK: PROCEDURAL RED HEART (CORAZÓN ROJO - 20% DE PROBABILIDAD) ===
+	if randf() < 0.2:
+		for attempt in range(30):
+			var rx = randi_range(2, max_grid_x - 3)
+			var ry = randi_range(top_y + 1, bottom_y - 1)
+			var cell = Vector2i(rx, ry)
+			
+			# Comprobar cajas seguras 5x5 de hijo y pareja
+			var in_child_box = abs(cell.x - child_coord.x) <= 2 and abs(cell.y - child_coord.y) <= 2
+			var in_partner_box = abs(cell.x - partner_coord.x) <= 2 and abs(cell.y - partner_coord.y) <= 2
+			if in_child_box or in_partner_box:
+				continue
+				
+			# Evitar solapamiento con la línea de descenso y su zona de borrado física
+			var cell_rect = Rect2(Vector2(cell.x * GRID_SIZE, cell.y * GRID_SIZE), Vector2(GRID_SIZE, GRID_SIZE))
+			if cell_rect.intersects(line_clear_rect):
+				continue
+				
+			# Evitar solapar con obstáculos u otros coleccionables
+			if astar.is_point_solid(cell):
+				continue
+				
+			# Asegurar accesibilidad física por raíces
+			if astar.get_id_path(child_coord, cell).size() > 0:
+				var red_heart = Panel.new()
+				red_heart.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
+				red_heart.position = Vector2(cell.x * GRID_SIZE + GRID_SIZE * 0.15, cell.y * GRID_SIZE + GRID_SIZE * 0.15)
+				red_heart.set_meta("type", "red_heart")
+				
+				var style = StyleBoxFlat.new()
+				style.bg_color = Color(0.18, 0.02, 0.05, 1.0) # Fondo carmesí oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(1.0, 0.2, 0.2, 1.0) # Borde rojo neón brillante
+				style.shadow_color = Color(1.0, 0.2, 0.2, 0.45) # Brillo rojo neón
+				style.shadow_size = 6
+				red_heart.add_theme_stylebox_override("panel", style)
+				
+				var icon_rect = TextureRect.new()
+				icon_rect.texture = load("res://assets/icon_heart_red.png")
+				icon_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+				icon_rect.grow_horizontal = Control.GROW_DIRECTION_BOTH
+				icon_rect.grow_vertical = Control.GROW_DIRECTION_BOTH
+				icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				icon_rect.offset_left = 4
+				icon_rect.offset_right = -4
+				icon_rect.offset_top = 4
+				icon_rect.offset_bottom = -4
+				red_heart.add_child(icon_rect)
+				
+				red_heart.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				red_heart.pivot_offset = red_heart.size / 2.0
+				red_heart.scale = Vector2.ZERO
+				rewards_container.add_child(red_heart)
+				
+				var t_heart = create_tween()
+				t_heart.tween_property(red_heart, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+				
+				astar.set_point_solid(cell, true)
+				break
 	# ==========================================================
 	
 	# Limpieza de memoria: borrar obstáculos muy antiguos
@@ -928,9 +1468,11 @@ func start_next_generation():
 			
 	# Limpiar historial de rutas antiguas para liberar memoria
 	var filtered_paths: Array[Vector2] = []
+	_occupied_previous_points.clear()
 	for p in all_previous_paths:
 		if p.y > limit_y:
 			filtered_paths.append(p)
+			_occupied_previous_points[p] = true
 	all_previous_paths = filtered_paths
 	
 	ancestor = child
@@ -952,6 +1494,118 @@ func start_next_generation():
 	generation += 1
 	update_ui()
 
+func spawn_growing_thorns(path: Array[Vector2], base_delay: float, total_duration: float) -> void:
+	if path.size() < 2:
+		return
+		
+	# Calcular la longitud total del camino para sincronizar los tiempos
+	var total_len = 0.0
+	var seg_lens: Array[float] = []
+	for i in range(path.size() - 1):
+		var l = path[i].distance_to(path[i+1])
+		total_len += l
+		seg_lens.append(l)
+		
+	if total_len < 5.0:
+		return
+		
+	# Crear la curva de afinado (grosor de base a punta de aguja)
+	var t_curve = Curve.new()
+	t_curve.add_point(Vector2(0.0, 1.0))
+	t_curve.add_point(Vector2(1.0, 0.0))
+	
+	var tween = create_tween()
+	
+	var accumulated_dist = 0.0
+	var step_dist = 28.0 # Espaciar una espina cada 28px (súper tupido y espectacular)
+	var next_thorn_dist = 14.0 # Primera espina a mitad de camino para que no quede en la junta
+	var alternate_side = true
+	
+	for i in range(path.size() - 1):
+		var p1 = path[i]
+		var p2 = path[i+1]
+		var dir = (p2 - p1).normalized()
+		var perp = Vector2(-dir.y, dir.x)
+		var seg_len = seg_lens[i]
+		
+		var local_dist = 0.0
+		while local_dist + next_thorn_dist < seg_len:
+			local_dist += next_thorn_dist
+			var pos = p1.lerp(p2, local_dist / seg_len)
+			var global_dist = accumulated_dist + local_dist
+			
+			# Sincronizar el retraso para que crezca justo cuando pasa el enroscado
+			var start_delay = base_delay + (global_dist / total_len) * total_duration
+			
+			# Alternar lados
+			var side = 1.0 if alternate_side else -1.0
+			alternate_side = not alternate_side
+			var spike_dir = perp * side
+			
+			# Crear el nodo de la espina
+			var thorn = Line2D.new()
+			thorn.width = 7.0 # Pinchito visible
+			thorn.width_curve = t_curve
+			thorn.default_color = Color(0.65, 0.65, 0.7, 0.85) # Gris plateado
+			thorn.joint_mode = Line2D.LINE_JOINT_ROUND
+			thorn.begin_cap_mode = Line2D.LINE_CAP_ROUND
+			thorn.end_cap_mode = Line2D.LINE_CAP_ROUND
+			thorn.add_point(pos)
+			thorn.add_point(pos) # Inicia con longitud cero
+			
+			roots_container.add_child(thorn)
+			
+			# Animar crecimiento de forma elástica
+			var max_len = 16.0
+			tween.parallel().tween_method(func(pct: float):
+				if is_instance_valid(thorn) and thorn.points.size() >= 2:
+					thorn.set_point_position(1, pos + spike_dir * (max_len * pct))
+			, 0.0, 1.0, 0.35).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(start_delay)
+			
+			# Preparar para la siguiente espina en este segmento
+			next_thorn_dist = step_dist
+			
+		accumulated_dist += seg_len
+		next_thorn_dist = step_dist - (seg_len - local_dist)
+
+func create_wrapping_helix(base_points: Array[Vector2]) -> Line2D:
+	var helix = Line2D.new()
+	helix.width = GRID_SIZE * 0.12 # Fino y sumamente elegante
+	helix.default_color = Color(0.65, 0.65, 0.7, 0.85) # Gris acero / plateado neón elegante
+	helix.joint_mode = Line2D.LINE_JOINT_ROUND
+	helix.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	helix.end_cap_mode = Line2D.LINE_CAP_ROUND
+	
+	var helix_points: Array[Vector2] = []
+	var total_dist = 0.0
+	
+	for i in range(base_points.size() - 1):
+		var p1 = base_points[i]
+		var p2 = base_points[i+1]
+		var seg_len = p1.distance_to(p2)
+		if seg_len < 1.0:
+			continue
+			
+		var dir = (p2 - p1).normalized()
+		var perp = Vector2(-dir.y, dir.x) # Vector normal para oscilar a los costados
+		
+		# Subdividir para crear ondas sinusoidales perfectas de resolución suave
+		var step_size = 8.0
+		var num_steps = int(seg_len / step_size)
+		for j in range(num_steps + 1):
+			var t = float(j) / num_steps
+			var pos = p1.lerp(p2, t)
+			var dist = total_dist + t * seg_len
+			
+			# Espiral de 1 vuelta completa por celda (frecuencia = 0.12, amplitud = 0.22 del grid)
+			var wave = sin(dist * 0.12) * (GRID_SIZE * 0.22)
+			helix_points.append(pos + perp * wave)
+			
+		total_dist += seg_len
+		
+	helix.points = helix_points
+	return helix
+
 func _play_music() -> void:
 	# Conectar señal para bucle infinito universal (funciona en OGG, MP3 y WAV por igual)
 	_music_player.finished.connect(_music_player.play)
@@ -964,11 +1618,21 @@ func _play_music() -> void:
 		AudioServer.set_bus_name(music_bus_idx, "Music")
 		AudioServer.set_bus_send(music_bus_idx, "Master") # Enviar salida a Master
 		
+		# Añadir el analizador de espectro dinámicamente al nuevo bus
+		var analyzer_effect = AudioEffectSpectrumAnalyzer.new()
+		AudioServer.add_bus_effect(music_bus_idx, analyzer_effect)
+		
+	# Garantizar volumen máximo y desmutear todos los buses para evitar fallos de inicialización del audio en Web
+	AudioServer.set_bus_mute(0, false)
+	AudioServer.set_bus_volume_db(0, 0.0)
+	AudioServer.set_bus_mute(music_bus_idx, false)
+	AudioServer.set_bus_volume_db(music_bus_idx, 0.0)
+	
 	_music_player.bus = "Music"
 	
 	var paths = [
-		"res://assets/Crux Noctis.mp3",
 		"res://assets/music.ogg",
+		"res://assets/Crux Noctis.mp3",
 		"res://assets/music.mp3",
 		"res://assets/music.wav"
 	]
@@ -976,8 +1640,8 @@ func _play_music() -> void:
 	var loaded_successfully = false
 	
 	for path in paths:
-		if ResourceLoader.exists(path):
-			var stream = load(path)
+		var stream = load(path)
+		if stream != null:
 			_music_player.stream = stream
 			_music_player.play()
 			print("Music successfully loaded and playing: ", path)
@@ -1016,6 +1680,10 @@ func _setup_main_menu():
 	_title_font = SystemFont.new()
 	_title_font.font_names = PackedStringArray(["Trebuchet MS", "Arial", "sans-serif"])
 	_title_font.font_weight = 700 # Negrita elegante
+	
+	_body_font = SystemFont.new()
+	_body_font.font_names = PackedStringArray(["Trebuchet MS", "Arial", "sans-serif"])
+	_body_font.font_weight = 500 # Regular/medio elegante y limpio
 	
 	# Contenedores para el Título del juego de Alta Costura por caracteres
 	var title_lbl = Control.new()
@@ -1061,18 +1729,42 @@ func _setup_main_menu():
 	# Botón bandera Inglesa
 	_en_flag_btn = Button.new()
 	_en_flag_btn.name = "FlagEN"
-	_en_flag_btn.text = "🇬🇧"
+	_en_flag_btn.icon = load("res://assets/flag_uk.png")
+	_en_flag_btn.expand_icon = true
+	_en_flag_btn.text = ""
 	_style_flag_button(_en_flag_btn)
 	_lang_selector.add_child(_en_flag_btn)
-	_en_flag_btn.pressed.connect(func(): _set_language("en"))
+	_en_flag_btn.pressed.connect(func():
+		_set_language("en")
+		AudioServer.set_bus_mute(0, false)
+		AudioServer.set_bus_volume_db(0, 0.0)
+		var music_bus_idx = AudioServer.get_bus_index("Music")
+		if music_bus_idx != -1:
+			AudioServer.set_bus_mute(music_bus_idx, false)
+			AudioServer.set_bus_volume_db(music_bus_idx, 0.0)
+		if _music_player and not _music_player.playing:
+			_music_player.play()
+	)
 	
 	# Botón bandera Española
 	_es_flag_btn = Button.new()
 	_es_flag_btn.name = "FlagES"
-	_es_flag_btn.text = "🇪🇸"
+	_es_flag_btn.icon = load("res://assets/flag_es.png")
+	_es_flag_btn.expand_icon = true
+	_es_flag_btn.text = ""
 	_style_flag_button(_es_flag_btn)
 	_lang_selector.add_child(_es_flag_btn)
-	_es_flag_btn.pressed.connect(func(): _set_language("es"))
+	_es_flag_btn.pressed.connect(func():
+		_set_language("es")
+		AudioServer.set_bus_mute(0, false)
+		AudioServer.set_bus_volume_db(0, 0.0)
+		var music_bus_idx = AudioServer.get_bus_index("Music")
+		if music_bus_idx != -1:
+			AudioServer.set_bus_mute(music_bus_idx, false)
+			AudioServer.set_bus_volume_db(music_bus_idx, 0.0)
+		if _music_player and not _music_player.playing:
+			_music_player.play()
+	)
 	
 	# Cargar panel de clasificación oculto
 	_setup_leaderboard_panel()
@@ -1260,10 +1952,284 @@ func _rebuild_character_title(container: Control, text: String, font: Font, font
 	update_ui()
 
 func _on_play_pressed():
+	# Garantizar que el audio se reproduce en la web tras la primera interacción (evitando el bloqueo de la Autoplay Policy del navegador)
+	AudioServer.set_bus_mute(0, false)
+	AudioServer.set_bus_volume_db(0, 0.0)
+	var music_bus_idx = AudioServer.get_bus_index("Music")
+	if music_bus_idx != -1:
+		AudioServer.set_bus_mute(music_bus_idx, false)
+		AudioServer.set_bus_volume_db(music_bus_idx, 0.0)
+		
+	if _music_player:
+		if not _music_player.playing:
+			_music_player.play()
+		else:
+			var pos = _music_player.get_playback_position()
+			_music_player.stop()
+			_music_player.play(pos)
+			
 	# Mostrar los retratos inmediatamente para que se deslicen de forma natural en la pantalla
 	in_menu = false
 	ancestor.show()
 	descendant.show()
+	
+	if roots_container:
+		roots_container.show()
+	if obstacles:
+		obstacles.show()
+	if rewards_container:
+		rewards_container.show()
+	
+	if not _mechanics_tutorial_panel:
+		_mechanics_tutorial_panel = Panel.new()
+		_mechanics_tutorial_panel.name = "MechanicsTutorialPanel"
+		_mechanics_tutorial_panel.size = Vector2(920, 154) # Altura reducida de 180 a 154
+		_mechanics_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 18) # ABOVE the portraits!
+		
+		var style = StyleBoxFlat.new()
+		style.bg_color = Color(0.04, 0.04, 0.06, 0.85) # Glassmorphism oscuro
+		style.border_width_left = 2
+		style.border_width_top = 2
+		style.border_width_right = 2
+		style.border_width_bottom = 2
+		style.border_color = Color(0.25, 0.25, 0.35, 0.7) # Borde acero premium
+		style.shadow_color = Color(0, 0, 0, 0.6)
+		style.shadow_size = 10
+		style.corner_radius_top_left = 12
+		style.corner_radius_top_right = 12
+		style.corner_radius_bottom_left = 12
+		style.corner_radius_bottom_right = 12
+		_mechanics_tutorial_panel.add_theme_stylebox_override("panel", style)
+		add_child(_mechanics_tutorial_panel)
+		
+	# Limpiar cualquier residuo previo de forma segura
+	for child in _mechanics_tutorial_panel.get_children():
+		child.queue_free()
+			
+	# Construir las 4 columnas del tutorial adaptadas al idioma seleccionado con los emojis oficiales en formato PNG
+	var cols_data = [
+		{
+			"icon_path": "res://assets/icon_mouse.png",
+			"title_en": "1. CONNECT",
+			"title_es": "1. CONECTAR",
+			"desc_en": "L-Click & Drag: Connect.\nR-Click: Hold to retract.",
+			"desc_es": "Click Izq. y Arrastra: Conectar.\nClick Der.: Mantén para borrar.",
+			"color": Color(0.3, 0.8, 1.0), # Celeste neón
+			"desc_font_size": 11
+		},
+		{
+			"icon_path": "res://assets/icon_heart_green.png",
+			"title_en": "2. LIFE HEART",
+			"title_es": "2. VIDA",
+			"desc_en": "+1 Point.",
+			"desc_es": "+1 Punto.",
+			"color": Color(0.2, 0.9, 0.2), # Verde neón
+			"desc_font_size": 18
+		},
+		{
+			"icon_path": "res://assets/icon_heart_red.png",
+			"title_en": "3. SUPER HEART",
+			"title_es": "3. SÚPER CORAZÓN",
+			"desc_en": "+5 Points.",
+			"desc_es": "+5 Puntos.",
+			"color": Color(1.0, 0.25, 0.25), # Rojo neón
+			"desc_font_size": 18
+		},
+		{
+			"icon_path": "res://assets/icon_hourglass.png",
+			"title_en": "4. HOURGLASS",
+			"title_es": "4. TIEMPO",
+			"desc_en": "Slows down camera speed for a few seconds.",
+			"desc_es": "Ralentiza la cámara por unos segundos.",
+			"color": Color(0.8, 0.4, 1.0), # Violeta/Púrpura neón
+			"desc_font_size": 11
+		}
+	]
+	
+	for i in range(cols_data.size()):
+		var data = cols_data[i]
+		
+		var card = Panel.new()
+		card.size = Vector2(210, 134) # Aumentado de 122 a 134 para darle espacio de respiración vertical
+		card.position = Vector2(16 + 224 * i, 10) # Centrado verticalmente de forma perfecta dentro del panel de 154
+		
+		var card_style = StyleBoxFlat.new()
+		card_style.bg_color = Color(0.06, 0.06, 0.08, 0.95) # Contraste oscuro premium
+		card_style.border_width_left = 2
+		card_style.border_width_top = 2
+		card_style.border_width_right = 2
+		card_style.border_width_bottom = 2
+		card_style.border_color = data["color"] * 0.4 # Sutil borde brillante a juego con la temática
+		card_style.corner_radius_top_left = 10
+		card_style.corner_radius_top_right = 10
+		card_style.corner_radius_bottom_left = 10
+		card_style.corner_radius_bottom_right = 10
+		card.add_theme_stylebox_override("panel", card_style)
+		_mechanics_tutorial_panel.add_child(card)
+		
+		var icon_rect = TextureRect.new()
+		icon_rect.texture = load(data["icon_path"])
+		icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_rect.custom_minimum_size = Vector2(32, 32)
+		icon_rect.size = Vector2(32, 32)
+		icon_rect.position = Vector2(210 / 2.0 - 16, 14) # Bajado de 8 a 14 para separar del borde superior
+		card.add_child(icon_rect)
+		
+		var title_lbl = Label.new()
+		title_lbl.text = data["title_en"] if current_language == "en" else data["title_es"]
+		title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		title_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		title_lbl.size = Vector2(210, 20)
+		title_lbl.position = Vector2(0, 52) # Bajado de 46 a 52
+		if _title_font:
+			title_lbl.add_theme_font_override("font", _title_font)
+		title_lbl.add_theme_font_size_override("font_size", 13) # Título más grande y arcade
+		title_lbl.add_theme_color_override("font_color", data["color"]) # Color neón temático
+		title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+		title_lbl.add_theme_constant_override("outline_size", 5) # Borde negro sólido arcade
+		card.add_child(title_lbl)
+		
+		var desc_lbl = Label.new()
+		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		desc_lbl.custom_minimum_size = Vector2(190, 52)
+		desc_lbl.size = Vector2(190, 52)
+		desc_lbl.text = data["desc_en"] if current_language == "en" else data["desc_es"]
+		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		desc_lbl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+		
+		var size = data["desc_font_size"]
+		var pos_y = 74 # Bajado de 68 a 74
+		if size >= 18:
+			pos_y = 78 # Bajado de 72 a 78 para textos cortos gigantes
+			
+		desc_lbl.position = Vector2(10, pos_y)
+		if _body_font:
+			desc_lbl.add_theme_font_override("font", _body_font)
+		desc_lbl.add_theme_font_size_override("font_size", size)
+		desc_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9, 1.0)) # Blanco brillante limpio
+		desc_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+		desc_lbl.add_theme_constant_override("outline_size", 4) # Contorno limpio y nítido
+		card.add_child(desc_lbl)
+		
+	# === SEGUNDO PANEL DEL TUTORIAL (🔋 SAVIA Y DESHACER) ===
+	if not _sap_tutorial_panel:
+		_sap_tutorial_panel = Panel.new()
+		_sap_tutorial_panel.name = "SapTutorialPanel"
+		_sap_tutorial_panel.size = Vector2(920, 136) # Altura incrementada de 120 a 136
+		_sap_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 412) # Posicionado más abajo con margen perfecto
+		
+		var style = StyleBoxFlat.new()
+		style.bg_color = Color(0.04, 0.04, 0.06, 0.85) # Glassmorphism oscuro
+		style.border_width_left = 2
+		style.border_width_top = 2
+		style.border_width_right = 2
+		style.border_width_bottom = 2
+		style.border_color = Color(0.25, 0.25, 0.35, 0.7) # Borde acero premium
+		style.shadow_color = Color(0, 0, 0, 0.6)
+		style.shadow_size = 10
+		style.corner_radius_top_left = 12
+		style.corner_radius_top_right = 12
+		style.corner_radius_bottom_left = 12
+		style.corner_radius_bottom_right = 12
+		_sap_tutorial_panel.add_theme_stylebox_override("panel", style)
+		add_child(_sap_tutorial_panel)
+		
+	for child in _sap_tutorial_panel.get_children():
+		child.queue_free()
+		
+	var sap_cols = [
+		{
+			"title_en": "ENERGY",
+			"title_es": "ENERGÍA",
+			"desc_en": "Your life meter. Drawing\npaths drains energy. If\nempty (0), you lose!",
+			"desc_es": "Tu medidor de vida. Dibujar\ncaminos drena tu energía.\n¡Si llega a 0, perderás!",
+			"color": Color(1.0, 0.85, 0.15) # Oro
+		},
+		{
+			"title_en": "PATH RETRACTION PENALTY",
+			"title_es": "PENALIZACIÓN AL RETRAER",
+			"desc_en": "Right-Click erases paths but only refunds\n33% of the energy cost (1/3).",
+			"desc_es": "El click derecho borra caminos, pero solo\ndevuelve el 33% de la energía (1/3).",
+			"color": Color(1.0, 0.4, 0.4) # Rojo peligro
+		}
+	]
+	
+	for i in range(sap_cols.size()):
+		var data = sap_cols[i]
+		
+		var card = Panel.new()
+		card.size = Vector2(436, 104) # Altura de 104
+		card.position = Vector2(16 + 452 * i, 16)
+		
+		var card_style = StyleBoxFlat.new()
+		card_style.bg_color = Color(0.06, 0.06, 0.08, 0.95)
+		card_style.border_width_left = 2
+		card_style.border_width_top = 2
+		card_style.border_width_right = 2
+		card_style.border_width_bottom = 2
+		card_style.border_color = data["color"] * 0.4
+		card_style.corner_radius_top_left = 10
+		card_style.corner_radius_top_right = 10
+		card_style.corner_radius_bottom_left = 10
+		card_style.corner_radius_bottom_right = 10
+		card.add_theme_stylebox_override("panel", card_style)
+		_sap_tutorial_panel.add_child(card)
+		
+		var title_lbl = Label.new()
+		title_lbl.text = data["title_en"] if current_language == "en" else data["title_es"]
+		title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		title_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		title_lbl.size = Vector2(200, 24) if i == 0 else Vector2(412, 24)
+		title_lbl.position = Vector2(12, 12)
+		if _title_font:
+			title_lbl.add_theme_font_override("font", _title_font)
+		title_lbl.add_theme_font_size_override("font_size", 14)
+		title_lbl.add_theme_color_override("font_color", data["color"])
+		title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+		title_lbl.add_theme_constant_override("outline_size", 5)
+		card.add_child(title_lbl)
+		
+		var desc_lbl = Label.new()
+		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		desc_lbl.text = data["desc_en"] if current_language == "en" else data["desc_es"]
+		desc_lbl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+		desc_lbl.position = Vector2(12, 36) if i == 0 else Vector2(12, 46) # Posición diferenciada para dar aire al título
+		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		if _body_font:
+			desc_lbl.add_theme_font_override("font", _body_font)
+		desc_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9, 1.0))
+		desc_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+		desc_lbl.add_theme_constant_override("outline_size", 4)
+		card.add_child(desc_lbl)
+		
+		if i == 0:
+			desc_lbl.add_theme_font_size_override("font_size", 12)
+			desc_lbl.custom_minimum_size = Vector2(200, 60)
+			desc_lbl.size = Vector2(200, 60)
+			
+			# ¡DIBUJAR LA BATERÍA ENTERA DE SAVIA ORIGINAL DEL JUEGO!
+			var preview_bat = Control.new()
+			preview_bat.name = "PreviewBatteryBar"
+			preview_bat.size = Vector2(240, 44)
+			preview_bat.position = Vector2(220, 38) # Desplazada sutilmente a x = 220 para dejar aire al texto
+			preview_bat.scale = Vector2(0.8, 0.8) # Reducida un 20% para encajar con finura suprema
+			preview_bat.draw.connect(_draw_preview_battery_bar.bind(preview_bat))
+			card.add_child(preview_bat)
+		else:
+			desc_lbl.add_theme_font_size_override("font_size", 14) # Letra gigante de tamaño 14 (igual al título) para máxima legibilidad
+			desc_lbl.custom_minimum_size = Vector2(412, 60)
+			desc_lbl.size = Vector2(412, 60)
+
+	_mechanics_tutorial_panel.show()
+	_mechanics_tutorial_panel.modulate.a = 0.0
+	
+	_sap_tutorial_panel.show()
+	_sap_tutorial_panel.modulate.a = 0.0
+	
+	var t_show = create_tween().set_parallel(true)
+	t_show.tween_property(_mechanics_tutorial_panel, "modulate:a", 1.0, 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT).set_delay(0.5)
+	t_show.tween_property(_sap_tutorial_panel, "modulate:a", 1.0, 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT).set_delay(0.5)
 	
 	# Iniciar transición suave de la cámara hacia el offset de juego actual
 	var tween = create_tween()
@@ -1272,7 +2238,7 @@ func _on_play_pressed():
 		# Asegurar que se posicionen de forma instantánea en el centro del ancestro antes de mostrarlos para evitar parpadeos
 		var ancestor_center = ancestor.position + ancestor.size / 2.0
 		if _tutorial_cursor:
-			_tutorial_cursor.position = ancestor_center - Vector2(24, 24)
+			_tutorial_cursor.position = ancestor_center - Vector2(18, 24)
 			_tutorial_cursor.show()
 		if _tutorial_line:
 			_tutorial_line.clear_points()
@@ -1286,12 +2252,12 @@ func _on_leaderboard_pressed():
 	
 	# Colocar el panel exactamente una pantalla por debajo del menú actual y centrado verticalmente
 	var menu_y = _menu_node.position.y
-	_leaderboard_panel.position = Vector2((1152 - 720) / 2, menu_y + 648.0 + 104.0)
+	_leaderboard_panel.position = Vector2((1152 - 720) / 2, menu_y + 648.0 + 74.0)
 	_leaderboard_panel.show()
 	
-	# Posicionar el botón de atrás justo a la izquierda de la ventana de clasificaciones
+	# Posicionar y mostrar el botón circular de volver atrás (alineado a la izquierda del panel)
 	if _leaderboard_back_btn:
-		_leaderboard_back_btn.position = Vector2(152, menu_y + 648.0 + 104.0)
+		_leaderboard_back_btn.position = Vector2(216 - 52 - 16, menu_y + 648.0 + 74.0)
 		_leaderboard_back_btn.show()
 	
 	var tween = create_tween()
@@ -1300,13 +2266,13 @@ func _on_leaderboard_pressed():
 func _setup_leaderboard_panel():
 	_leaderboard_panel = PanelContainer.new()
 	_leaderboard_panel.name = "LeaderboardPanel"
-	_leaderboard_panel.custom_minimum_size = Vector2(720, 440)
-	_leaderboard_panel.size = Vector2(720, 440)
-	_leaderboard_panel.position = Vector2((1152 - 720) / 2, 104)
+	_leaderboard_panel.custom_minimum_size = Vector2(720, 500)
+	_leaderboard_panel.size = Vector2(720, 500)
+	_leaderboard_panel.position = Vector2((1152 - 720) / 2, 74)
 	add_child(_leaderboard_panel) # Agregar a self para que se dibuje en el espacio del mundo 2D
 	_leaderboard_panel.hide() # Inicialmente oculto
 	
-	# Estilo del panel
+	# Estilo del panel del Oráculo/Clasificaciones
 	var panel_box = StyleBoxFlat.new()
 	panel_box.bg_color = Color(0.08, 0.08, 0.08, 0.96)
 	panel_box.border_width_left = 3
@@ -1320,34 +2286,36 @@ func _setup_leaderboard_panel():
 	panel_box.corner_radius_bottom_right = 8
 	_leaderboard_panel.add_theme_stylebox_override("panel", panel_box)
 	
-	# Inicializar botón de volver atrás como icono redondo en la esquina superior izquierda
+	# Inicializar botón circular de volver atrás
 	_leaderboard_back_btn = Button.new()
 	_leaderboard_back_btn.name = "LeaderboardBackBtn"
-	_leaderboard_back_btn.text = "←" # Un icono de flecha hacia la izquierda
+	_leaderboard_back_btn.text = "" # Sin texto, solo el icono retro pixel art
+	_leaderboard_back_btn.icon = load("res://assets/icon_back_arrow.png")
+	_leaderboard_back_btn.expand_icon = true
+	_leaderboard_back_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_leaderboard_back_btn.custom_minimum_size = Vector2(52, 52)
-	_leaderboard_back_btn.add_theme_font_size_override("font_size", 26)
 	_leaderboard_back_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	_leaderboard_back_btn.pivot_offset = Vector2(26, 26)
 	
 	var back_normal = StyleBoxFlat.new()
-	back_normal.bg_color = Color(0.12, 0.04, 0.04, 0.9)
+	back_normal.bg_color = Color(0.08, 0.08, 0.08, 0.96)
 	back_normal.border_width_left = 2
 	back_normal.border_width_top = 2
 	back_normal.border_width_right = 2
 	back_normal.border_width_bottom = 2
-	back_normal.border_color = Color(0.8, 0.2, 0.2, 1)
+	back_normal.border_color = Color(0.8, 0.65, 0.1, 1) # Borde dorado a juego con el panel
 	back_normal.corner_radius_top_left = 26
 	back_normal.corner_radius_top_right = 26
 	back_normal.corner_radius_bottom_left = 26
 	back_normal.corner_radius_bottom_right = 26
 	
 	var back_hover = StyleBoxFlat.new()
-	back_hover.bg_color = Color(0.25, 0.08, 0.08, 0.9)
+	back_hover.bg_color = Color(0.14, 0.12, 0.08, 0.98)
 	back_hover.border_width_left = 2
 	back_hover.border_width_top = 2
 	back_hover.border_width_right = 2
 	back_hover.border_width_bottom = 2
-	back_hover.border_color = Color(1.0, 0.35, 0.35, 1)
+	back_hover.border_color = Color(0.95, 0.8, 0.25, 1) # Dorado brillante en hover
 	back_hover.corner_radius_top_left = 26
 	back_hover.corner_radius_top_right = 26
 	back_hover.corner_radius_bottom_left = 26
@@ -1357,32 +2325,28 @@ func _setup_leaderboard_panel():
 	_leaderboard_back_btn.add_theme_stylebox_override("hover", back_hover)
 	_leaderboard_back_btn.add_theme_stylebox_override("pressed", back_normal)
 	_leaderboard_back_btn.add_theme_stylebox_override("focus", back_hover)
-	_leaderboard_back_btn.add_theme_color_override("font_color", Color(1, 0.8, 0.8, 1))
 	
-	# Efecto de escala al pasar el ratón
 	_leaderboard_back_btn.mouse_entered.connect(func():
-		var t = create_tween()
-		t.tween_property(_leaderboard_back_btn, "scale", Vector2(1.08, 1.08), 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		var tween_scale = create_tween()
+		tween_scale.tween_property(_leaderboard_back_btn, "scale", Vector2(1.08, 1.08), 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	)
 	_leaderboard_back_btn.mouse_exited.connect(func():
-		var t = create_tween()
-		t.tween_property(_leaderboard_back_btn, "scale", Vector2.ONE, 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		var tween_scale = create_tween()
+		tween_scale.tween_property(_leaderboard_back_btn, "scale", Vector2.ONE, 0.15).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	)
 	
-	# Acción del botón para volver atrás
 	_leaderboard_back_btn.pressed.connect(func():
 		var menu_y = _menu_node.position.y
-		var tween = create_tween()
-		tween.tween_property(camera, "position:y", menu_y, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
-		await tween.finished
-		_leaderboard_panel.hide()
-		_leaderboard_back_btn.hide()
+		var tween_press = create_tween()
+		tween_press.tween_property(camera, "position:y", menu_y, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+		tween_press.tween_callback(func():
+			_leaderboard_panel.hide()
+			_leaderboard_back_btn.hide()
+		)
 	)
 	
 	add_child(_leaderboard_back_btn)
 	_leaderboard_back_btn.hide()
-	
-	_update_leaderboard_content()
 
 func _update_leaderboard_content():
 	# Limpiar hijos viejos del panel si existen
@@ -1434,6 +2398,8 @@ func _update_leaderboard_content():
 	var t = create_tween().set_loops()
 	t.tween_property(status_lbl, "modulate:a", 0.3, 0.6).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	t.tween_property(status_lbl, "modulate:a", 0.9, 0.6).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	
+	# El botón de atrás es ahora un elemento circular e independiente, configurado en _setup_leaderboard_panel.
 	
 	# Realizar la petición GET asíncrona al VPS
 	_make_http_request(
@@ -1531,21 +2497,26 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		var pos_lbl = Label.new()
 		pos_lbl.text = str(i + 1) + ". "
 		pos_lbl.custom_minimum_size = Vector2(40, 0)
+		if _body_font:
+			pos_lbl.add_theme_font_override("font", _body_font)
 		pos_lbl.add_theme_font_size_override("font_size", 20)
-		pos_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6, 1))
+		pos_lbl.add_theme_color_override("font_color", Color(0.8, 0.65, 0.1, 1) if i < 3 else Color(0.6, 0.6, 0.6, 1))
 		hbox.add_child(pos_lbl)
+
 		
-		# 2. Columna de Nombre: Ancho mínimo de 200px con expansión fill y recorte de texto largo
+		# 2. Columna de Nombre: Ancho mínimo de 176px con expansión fill y recorte de texto largo
 		var name_lbl = Label.new()
 		name_lbl.text = item["name"]
-		name_lbl.custom_minimum_size = Vector2(200, 0)
+		name_lbl.custom_minimum_size = Vector2(176, 0)
 		name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		name_lbl.clip_text = true
+		if _body_font:
+			name_lbl.add_theme_font_override("font", _body_font)
 		name_lbl.add_theme_font_size_override("font_size", 20)
 		if item["name"] == "Tu Récord" or item["name"] == "Your Record":
 			name_lbl.add_theme_color_override("font_color", Color(0.2, 0.8, 1, 1))
 		else:
-			name_lbl.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9, 1))
+			name_lbl.add_theme_color_override("font_color", Color(0.9, 0.85, 0.7, 1) if i < 3 else Color(0.9, 0.9, 0.9, 1))
 		hbox.add_child(name_lbl)
 		
 		# 3. Columna de Fecha: Ancho fijo de 140px, centrado horizontalmente
@@ -1553,8 +2524,10 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		date_lbl.text = item.get("date", "17/05/2026")
 		date_lbl.custom_minimum_size = Vector2(140, 0)
 		date_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		if _body_font:
+			date_lbl.add_theme_font_override("font", _body_font)
 		date_lbl.add_theme_font_size_override("font_size", 16)
-		date_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5, 1))
+		date_lbl.add_theme_color_override("font_color", Color(0.8, 0.7, 0.5, 0.8)) # Pergamino dorado medieval cálido
 		hbox.add_child(date_lbl)
 		
 		# 4. Columna de Puntuación (Generación): Ancho de 100px, alineado a la derecha
@@ -1562,11 +2535,13 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		score_lbl.text = str(int(item["score"])) + " pts"
 		score_lbl.custom_minimum_size = Vector2(100, 0)
 		score_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		if _body_font:
+			score_lbl.add_theme_font_override("font", _body_font)
 		score_lbl.add_theme_font_size_override("font_size", 20)
 		if item["name"] == "Tu Récord" or item["name"] == "Your Record":
 			score_lbl.add_theme_color_override("font_color", Color(0.2, 0.8, 1, 1))
 		else:
-			score_lbl.add_theme_color_override("font_color", Color(1, 0.9, 0.5, 1))
+			score_lbl.add_theme_color_override("font_color", Color(0.95, 0.8, 0.2, 1) if i < 3 else Color(0.8, 0.7, 0.5, 1))
 		hbox.add_child(score_lbl)
 		
 	# VBox para los dos botones de navegación de la lista (Subir y Bajar la lista)
@@ -1575,25 +2550,29 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	nav_vbox.add_theme_constant_override("separation", 16)
 	content_hbox.add_child(nav_vbox)
 	
-	# Botón SUBIR LISTA (▲)
+	# Botón SUBIR LISTA (▲ con icono PNG)
 	var list_up_btn = Button.new()
-	list_up_btn.text = "▲"
-	list_up_btn.custom_minimum_size = Vector2(48, 48)
-	list_up_btn.add_theme_font_size_override("font_size", 20)
+	list_up_btn.text = ""
+	list_up_btn.icon = load("res://assets/icon_arrow_up.png")
+	list_up_btn.expand_icon = true
+	list_up_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	list_up_btn.custom_minimum_size = Vector2(44, 44) # Circular perfecto
 	list_up_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	list_up_btn.pivot_offset = Vector2(24, 24)
+	list_up_btn.pivot_offset = Vector2(22, 22)
 	nav_vbox.add_child(list_up_btn)
 	
-	# Botón BAJAR LISTA (▼)
+	# Botón BAJAR LISTA (▼ con icono PNG)
 	var list_down_btn = Button.new()
-	list_down_btn.text = "▼"
-	list_down_btn.custom_minimum_size = Vector2(48, 48)
-	list_down_btn.add_theme_font_size_override("font_size", 20)
+	list_down_btn.text = ""
+	list_down_btn.icon = load("res://assets/icon_arrow_down.png")
+	list_down_btn.expand_icon = true
+	list_down_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	list_down_btn.custom_minimum_size = Vector2(44, 44) # Circular perfecto
 	list_down_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	list_down_btn.pivot_offset = Vector2(24, 24)
+	list_down_btn.pivot_offset = Vector2(22, 22)
 	nav_vbox.add_child(list_down_btn)
 	
-	# Estilos premium para los botones de la lista
+	# Estilos premium para los botones de la lista (Circular radial neón)
 	var list_btn_normal = StyleBoxFlat.new()
 	list_btn_normal.bg_color = Color(0.12, 0.1, 0.06, 1)
 	list_btn_normal.border_width_left = 2
@@ -1601,10 +2580,10 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	list_btn_normal.border_width_right = 2
 	list_btn_normal.border_width_bottom = 2
 	list_btn_normal.border_color = Color(0.7, 0.55, 0.15, 1)
-	list_btn_normal.corner_radius_top_left = 6
-	list_btn_normal.corner_radius_top_right = 6
-	list_btn_normal.corner_radius_bottom_left = 6
-	list_btn_normal.corner_radius_bottom_right = 6
+	list_btn_normal.corner_radius_top_left = 22
+	list_btn_normal.corner_radius_top_right = 22
+	list_btn_normal.corner_radius_bottom_left = 22
+	list_btn_normal.corner_radius_bottom_right = 22
 	
 	var list_btn_hover = StyleBoxFlat.new()
 	list_btn_hover.bg_color = Color(0.22, 0.18, 0.1, 1)
@@ -1613,17 +2592,16 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	list_btn_hover.border_width_right = 2
 	list_btn_hover.border_width_bottom = 2
 	list_btn_hover.border_color = Color(0.95, 0.8, 0.25, 1)
-	list_btn_hover.corner_radius_top_left = 6
-	list_btn_hover.corner_radius_top_right = 6
-	list_btn_hover.corner_radius_bottom_left = 6
-	list_btn_hover.corner_radius_bottom_right = 6
+	list_btn_hover.corner_radius_top_left = 22
+	list_btn_hover.corner_radius_top_right = 22
+	list_btn_hover.corner_radius_bottom_left = 22
+	list_btn_hover.corner_radius_bottom_right = 22
 	
 	for btn in [list_up_btn, list_down_btn]:
 		btn.add_theme_stylebox_override("normal", list_btn_normal)
 		btn.add_theme_stylebox_override("hover", list_btn_hover)
 		btn.add_theme_stylebox_override("pressed", list_btn_normal)
 		btn.add_theme_stylebox_override("focus", list_btn_hover)
-		btn.add_theme_color_override("font_color", Color(0.9, 0.8, 0.5, 1))
 		
 		# Efecto hover
 		btn.mouse_entered.connect(func():
@@ -1682,6 +2660,45 @@ func _setup_battery_ui():
 	$UI.add_child(_battery_bar)
 	
 	_battery_bar.draw.connect(_draw_battery_bar)
+	
+	# === SISTEMA DE INTERFAZ DEL RELOJ DE ARENA (⏳) ===
+	_hourglass_ui = Control.new()
+	_hourglass_ui.name = "HourglassUI"
+	_hourglass_ui.size = Vector2(64, 64)
+	_hourglass_ui.position = Vector2(32, 84) # 12px de holgura por debajo de la batería (y=28+44=72)
+	_hourglass_ui.pivot_offset = Vector2(32, 32)
+	_hourglass_ui.scale = Vector2.ZERO
+	_hourglass_ui.modulate.a = 0.0
+	_hourglass_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	$UI.add_child(_hourglass_ui)
+	
+	_hourglass_ui.draw.connect(_draw_hourglass_ui)
+	_hourglass_ui.hide()
+	
+	# Icono del reloj en el centro
+	var icon_rect = TextureRect.new()
+	icon_rect.name = "IconLabel"
+	icon_rect.texture = load("res://assets/icon_hourglass.png")
+	icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon_rect.size = Vector2(24, 24)
+	icon_rect.position = Vector2(20, 20) # Centrado en el panel circular de 64x64
+	_hourglass_ui.add_child(icon_rect)
+	
+	# Multiplicador de pila en la esquina inferior derecha
+	var mult_lbl = Label.new()
+	mult_lbl.name = "MultiplierLabel"
+	mult_lbl.text = ""
+	mult_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	mult_lbl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	mult_lbl.size = Vector2(28, 20)
+	mult_lbl.position = Vector2(34, 38)
+	mult_lbl.add_theme_font_size_override("font_size", 12)
+	mult_lbl.add_theme_color_override("font_color", Color(0.85, 0.55, 1.0, 1.0))
+	mult_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	mult_lbl.add_theme_constant_override("outline_size", 5)
+	mult_lbl.hide()
+	_hourglass_ui.add_child(mult_lbl)
 
 func _draw_battery_bar():
 	var size = _battery_bar.size
@@ -1757,6 +2774,90 @@ func _draw_battery_bar():
 		seg_box.bg_color = empty_color.lerp(seg_color, seg_percentage)
 			
 		_battery_bar.draw_style_box(seg_box, seg_rect)
+
+func _draw_preview_battery_bar(node: Control):
+	var size = node.size
+	var width = size.x
+	var height = size.y
+	
+	# 1. Dibujar el terminal positivo (el pezón de la batería a la derecha)
+	var tip_width = 8
+	var tip_height = 18
+	var tip_box = StyleBoxFlat.new()
+	tip_box.bg_color = Color(0.8, 0.65, 0.1, 1.0) # Oro
+	tip_box.corner_radius_top_right = 4
+	tip_box.corner_radius_bottom_right = 4
+	node.draw_style_box(tip_box, Rect2(Vector2(width - tip_width, (height - tip_height) / 2), Vector2(tip_width, tip_height)))
+	
+	# 2. Dibujar el marco principal de la batería
+	var body_width = width - tip_width - 2
+	var frame_box = StyleBoxFlat.new()
+	frame_box.bg_color = Color(0.05, 0.05, 0.05, 0.7) # Fondo semi-transparente oscuro
+	frame_box.border_width_left = 3
+	frame_box.border_width_top = 3
+	frame_box.border_width_right = 3
+	frame_box.border_width_bottom = 3
+	frame_box.border_color = Color(0.8, 0.65, 0.1, 1.0) # Oro
+	frame_box.corner_radius_top_left = 6
+	frame_box.corner_radius_top_right = 6
+	frame_box.corner_radius_bottom_left = 6
+	frame_box.corner_radius_bottom_right = 6
+	node.draw_style_box(frame_box, Rect2(Vector2.ZERO, Vector2(body_width, height)))
+	
+	# 3. Dibujar los segmentos internos
+	var padding = 6
+	var max_segments = 10
+	var seg_gap = 4
+	var available_w = body_width - (padding * 2) - (seg_gap * (max_segments - 1))
+	var seg_w = available_w / max_segments
+	var seg_h = height - (padding * 2)
+	
+	var percentage = 0.8 # Mostrar batería llena/alta en el tutorial
+	var seg_color = Color(1.0, 0.9, 0, 1.0) # Oro brillante
+	
+	for i in range(max_segments):
+		var seg_x = padding + i * (seg_w + seg_gap)
+		var seg_rect = Rect2(Vector2(seg_x, padding), Vector2(seg_w, seg_h))
+		
+		var seg_box = StyleBoxFlat.new()
+		seg_box.corner_radius_top_left = 2
+		seg_box.corner_radius_top_right = 2
+		seg_box.corner_radius_bottom_left = 2
+		seg_box.corner_radius_bottom_right = 2
+		
+		var seg_percentage = (percentage - (float(i) / max_segments)) * max_segments
+		seg_percentage = clamp(seg_percentage, 0.0, 1.0)
+		
+		var empty_color = Color(0.2, 0.2, 0.2, 0.4)
+		seg_box.bg_color = empty_color.lerp(seg_color, seg_percentage)
+			
+		node.draw_style_box(seg_box, seg_rect)
+
+func _draw_hourglass_ui():
+	var center = Vector2(32, 32)
+	var radius = 24.0
+	var bg_color = Color(0.15, 0.1, 0.2, 0.6) # Fondo cristal oscuro morado
+	var border_color = Color(0.3, 0.2, 0.4, 0.5) # Borde sutil
+	var active_color = Color(0.8, 0.4, 1.0, 1.0) # Violeta de neón brillante
+	var glow_color = Color(0.8, 0.4, 1.0, 0.25)
+	
+	# 1. Dibujar el fondo circular de cristal
+	_hourglass_ui.draw_circle(center, radius, bg_color)
+	
+	# 2. Dibujar el borde circular de fondo (línea fina)
+	_hourglass_ui.draw_arc(center, radius, 0.0, TAU, 64, border_color, 2.0, true)
+	
+	# 3. Dibujar el arco de progreso activo
+	if hourglass_time_left > 0.0:
+		var ratio = hourglass_time_left / (hourglass_max_duration * max(1, hourglass_stack))
+		ratio = clamp(ratio, 0.0, 1.0)
+		var start_angle = -PI / 2.0
+		var end_angle = start_angle + ratio * TAU
+		
+		# Efecto de brillo de neón (dibujando un arco más ancho con opacidad baja debajo)
+		_hourglass_ui.draw_arc(center, radius, start_angle, end_angle, 64, glow_color, 6.0, true)
+		# Arco principal nítido y brillante
+		_hourglass_ui.draw_arc(center, radius, start_angle, end_angle, 64, active_color, 3.0, true)
 
 # ==============================================================================
 # SISTEMA DE COMBO DE GENERACIÓN PREMIUM (ESTILO ARCADE)
@@ -2010,18 +3111,19 @@ func _on_submit_pressed():
 	_reset_game_state_to_menu(new_menu_y)
 	
 	# Transición premium: la cámara desciende al nuevo menú principal mientras el área de clasificación se desvanece
-	var t = create_tween().set_parallel(true)
+	var t = create_tween()
+	t.set_parallel(true)
 	t.tween_property(camera, "position:y", new_menu_y, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 	t.tween_property(_classification_area, "modulate:a", 0.0, 1.0).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	
-	await t.finished
-	_classification_area.hide()
-	
-	# Reestablecer el botón y campo de texto para la siguiente partida
-	if submit_btn:
-		submit_btn.disabled = false
-	if name_input:
-		name_input.text = ""
+	t.set_parallel(false)
+	t.tween_callback(func():
+		_classification_area.hide()
+		# Reestablecer el botón y campo de texto para la siguiente partida
+		if submit_btn:
+			submit_btn.disabled = false
+		if name_input:
+			name_input.text = ""
+	)
 
 func _on_back_to_menu_pressed():
 	var cancel_btn = _classification_area.find_child("CancelBtn", true, false)
@@ -2038,16 +3140,17 @@ func _on_back_to_menu_pressed():
 	_reset_game_state_to_menu(new_menu_y)
 	
 	# Transición premium: la cámara desciende al nuevo menú principal mientras el área de clasificación se desvanece
-	var t = create_tween().set_parallel(true)
+	var t = create_tween()
+	t.set_parallel(true)
 	t.tween_property(camera, "position:y", new_menu_y, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 	t.tween_property(_classification_area, "modulate:a", 0.0, 1.0).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	
-	await t.finished
-	_classification_area.hide()
-	
-	# Reestablecer el botón y campo de texto para la siguiente partida
-	if cancel_btn:
-		cancel_btn.disabled = false
+	t.set_parallel(false)
+	t.tween_callback(func():
+		_classification_area.hide()
+		# Reestablecer el botón y campo de texto para la siguiente partida
+		if cancel_btn:
+			cancel_btn.disabled = false
+	)
 	var name_input = _classification_area.find_child("NameInput", true, false)
 	if name_input:
 		name_input.text = ""
@@ -2064,6 +3167,15 @@ func _reset_game_state_to_menu(new_menu_y: float):
 	is_retracting = false
 	waiting_for_next = false
 	camera_speed = 15.0
+	target_camera_speed = 15.0
+	
+	# Resetear el estado de la ralentización
+	hourglass_time_left = 0.0
+	hourglass_stack = 0
+	if _hourglass_ui:
+		_hourglass_ui.hide()
+		_hourglass_ui.scale = Vector2.ZERO
+		_hourglass_ui.modulate.a = 0.0
 	
 	if _leaderboard_panel: _leaderboard_panel.hide()
 	if _leaderboard_back_btn: _leaderboard_back_btn.hide()
@@ -2081,6 +3193,7 @@ func _reset_game_state_to_menu(new_menu_y: float):
 			child.queue_free()
 			
 	all_previous_paths.clear()
+	_occupied_previous_points.clear()
 	current_path.clear()
 	
 	# 4. Limpiar obstáculos viejos
@@ -2111,6 +3224,43 @@ func _reset_game_state_to_menu(new_menu_y: float):
 	# 6. Recrear tutorial visual limpio
 	if _tutorial_line: _tutorial_line.queue_free()
 	if _tutorial_cursor: _tutorial_cursor.queue_free()
+	if _mechanics_tutorial_panel:
+		_mechanics_tutorial_panel.queue_free()
+		_mechanics_tutorial_panel = null
+		
+	_mechanics_tutorial_panel = Panel.new()
+	_mechanics_tutorial_panel.name = "MechanicsTutorialPanel"
+	_mechanics_tutorial_panel.size = Vector2(920, 154) # Altura reducida de 180 a 154
+	_mechanics_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 18) # ABOVE the portraits!
+	
+	var style = StyleBoxFlat.new()
+	style.bg_color = Color(0.04, 0.04, 0.06, 0.85) # Glassmorphism oscuro
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.border_color = Color(0.25, 0.25, 0.35, 0.7) # Borde acero premium
+	style.shadow_color = Color(0, 0, 0, 0.6)
+	style.shadow_size = 10
+	style.corner_radius_top_left = 12
+	style.corner_radius_top_right = 12
+	style.corner_radius_bottom_left = 12
+	style.corner_radius_bottom_right = 12
+	_mechanics_tutorial_panel.add_theme_stylebox_override("panel", style)
+	add_child(_mechanics_tutorial_panel)
+	_mechanics_tutorial_panel.hide()
+	
+	if _sap_tutorial_panel:
+		_sap_tutorial_panel.queue_free()
+		_sap_tutorial_panel = null
+		
+	_sap_tutorial_panel = Panel.new()
+	_sap_tutorial_panel.name = "SapTutorialPanel"
+	_sap_tutorial_panel.size = Vector2(920, 136) # Altura incrementada de 120 a 136
+	_sap_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 396) # BELOW the portraits!
+	_sap_tutorial_panel.add_theme_stylebox_override("panel", style)
+	add_child(_sap_tutorial_panel)
+	_sap_tutorial_panel.hide()
 	
 	_tutorial_line = Line2D.new()
 	_tutorial_line.name = "TutorialLine"
@@ -2122,17 +3272,18 @@ func _reset_game_state_to_menu(new_menu_y: float):
 	add_child(_tutorial_line)
 	_tutorial_line.hide()
 	
-	_tutorial_cursor = Label.new()
+	_tutorial_cursor = TextureRect.new()
 	_tutorial_cursor.name = "TutorialCursor"
-	_tutorial_cursor.text = "👉"
-	_tutorial_cursor.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_tutorial_cursor.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_tutorial_cursor.add_theme_font_size_override("font_size", 48)
-	_tutorial_cursor.pivot_offset = Vector2(24, 24)
+	_tutorial_cursor.texture = load("res://assets/icon_arrow_yellow.png")
+	_tutorial_cursor.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_tutorial_cursor.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_tutorial_cursor.custom_minimum_size = Vector2(36, 36)
+	_tutorial_cursor.size = Vector2(36, 36)
+	_tutorial_cursor.pivot_offset = Vector2(18, 18)
 	add_child(_tutorial_cursor)
 	_tutorial_cursor.hide()
 	
-	_tutorial_cursor.position = (ancestor.position + ancestor.size / 2.0) - Vector2(24, 24)
+	_tutorial_cursor.position = (ancestor.position + ancestor.size / 2.0) - Vector2(18, 24)
 	
 	# 7. Ocultar la UI de batería y combo elásticamente para el nuevo inicio
 	if _battery_bar:
@@ -2146,6 +3297,7 @@ func _reset_game_state_to_menu(new_menu_y: float):
 		_green_score_label.scale = Vector2.ZERO
 		_green_score_label.modulate.a = 0.0
 	green_squares_collected = 0
+	displayed_green_score = 0
 		
 	# Actualizar UI
 	update_ui()
