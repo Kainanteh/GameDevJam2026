@@ -1,39 +1,36 @@
 import os
 from PIL import Image
 
-def generate_cover_image():
-    src_path = "/home/kainanteh/.gemini/antigravity/brain/63aa44c6-0eab-45be-a406-ba2aecfa9f7b/itch_header_ancestral_path_1779138400833.png"
-    out_path1 = "/home/kainanteh/game-dev-jam-2026/cover.png"
-    out_path2 = "/home/kainanteh/.gemini/antigravity/brain/63aa44c6-0eab-45be-a406-ba2aecfa9f7b/cover.png"
+def generate_itch_cover():
+    src_path = "/home/kainanteh/.gemini/antigravity/brain/63aa44c6-0eab-45be-a406-ba2aecfa9f7b/banner_i_was_what_you_are_swapped_1779175615275.png"
+    out_paths = [
+        "/home/kainanteh/game-dev-jam-2026/itch_cover.png",
+        "/home/kainanteh/.gemini/antigravity/brain/63aa44c6-0eab-45be-a406-ba2aecfa9f7b/itch_cover.png"
+    ]
     
     if not os.path.exists(src_path):
-        print("Error: Source image not found at:", src_path)
+        print("Error: Swapped banner image does not exist!")
         return
         
     img = Image.open(src_path)
+    width, height = img.size
     
-    # 630x500 is the recommended size for itch.io game covers
-    # The source is 1024x1024 (1:1). 
-    # To convert to 630x500 (1.26:1) without stretching:
-    # Scale width to 630. Height will be 630.
-    img_resized = img.resize((630, 630), Image.Resampling.LANCZOS)
+    # We want a 630x500 ratio (1.26:1)
+    # Let's crop a rectangle from the 1024x1024 image.
+    # To keep the border and content nicely framed without squishing:
+    # A box of width 1024 and height 812.7 (rounded to 812) centered vertically
+    crop_height = 812
+    y_start = (height - crop_height) // 2 # (1024 - 812) // 2 = 106
     
-    # Crop height from 630 to 500.
-    # The text is at the top, characters are at the bottom.
-    # Let's crop slightly more from the bottom to protect the top title text and stars.
-    # We crop 35 pixels from the top and 95 pixels from the bottom.
-    left = 0
-    top = 35
-    right = 630
-    bottom = 535
+    cropped_img = img.crop((0, y_start, width, y_start + crop_height))
     
-    cover = img_resized.crop((left, top, right, bottom))
+    # Resize to exactly 630x500 using LANCZOS for high quality
+    resized_img = cropped_img.resize((630, 500), Image.Resampling.LANCZOS)
     
-    # Save the resulting 630x500 image
-    cover.save(out_path1, "PNG")
-    cover.save(out_path2, "PNG")
-    print(f"Successfully generated 630x500 cover image at {out_path1} and {out_path2}")
-    print(f"Dimensions: {cover.size}")
+    for path in out_paths:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        resized_img.save(path, "PNG")
+        print(f"Saved cover image (630x500) to: {path}")
 
 if __name__ == "__main__":
-    generate_cover_image()
+    generate_itch_cover()

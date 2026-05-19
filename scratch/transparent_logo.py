@@ -2,7 +2,7 @@ import os
 from PIL import Image
 
 def process_sharp_logo():
-    new_banner_path = "/home/kainanteh/.gemini/antigravity/brain/63aa44c6-0eab-45be-a406-ba2aecfa9f7b/banner_i_was_what_you_are_1779133437293.png"
+    new_banner_path = "/home/kainanteh/.gemini/antigravity/brain/63aa44c6-0eab-45be-a406-ba2aecfa9f7b/banner_i_was_what_you_are_swapped_1779175615275.png"
     
     out_paths = [
         "/home/kainanteh/game-dev-jam-2026/logo_titulo_transparent.png",
@@ -19,7 +19,7 @@ def process_sharp_logo():
     banner = Image.open(new_banner_path)
     
     # Recortar el texto del título de forma limpia y apaisada
-    logo_crop = banner.crop((50, 75, banner.width - 50, 275)).convert("RGBA")
+    logo_crop = banner.crop((50, 75, banner.width - 50, 295)).convert("RGBA")
     
     datas = logo_crop.getdata()
     new_data = []

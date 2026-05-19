@@ -19,7 +19,7 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
-color = Color(0.05, 0.05, 0.05, 1)
+color = Color(0.027451, 0.0235294, 0.0392157, 1)
 
 [node name="Obstacles" type="Node2D" parent="." unique_id=1834554937]
 

@@ -69,8 +69,8 @@ var leaderboard_entries: Array = []
 var record_generation = 0
 var current_language: String = "en"
 var _lang_selector: HBoxContainer
-var _es_flag_btn: Button
-var _en_flag_btn: Button
+var _es_flags: Array = []
+var _en_flags: Array = []
 var _menu_last_magnitude: float = 0.0
 var _menu_beat_cooldown: float = 0.0
 var _title_beat_pulse: float = 0.0
@@ -86,6 +86,19 @@ var _hourglass_ui: Control
 var hourglass_time_left: float = 0.0
 var hourglass_max_duration: float = 6.0
 var hourglass_stack: int = 0
+
+# Variables para el Power-up de Infinito (∞)
+var infinity_powerup_active: bool = false
+var infinity_start_delay: float = 0.0
+var auto_descent_points: Array[Vector2] = []
+var auto_descent_index: int = 0
+var auto_descent_tip_pos: Vector2 = Vector2.ZERO
+var pre_powerup_camera_speed: float = 15.0
+
+# Variables para los difuminados (vignette/fade) superior e inferior
+var _fade_layer: CanvasLayer = null
+var _fade_top: TextureRect = null
+var _fade_bottom: TextureRect = null
 
 func _ready():
 	randomize()
@@ -171,36 +184,40 @@ func _ready():
 		_tutorial_line.hide()
 	if _tutorial_cursor:
 		_tutorial_cursor.hide()
+		
+	# Inicializar los difuminados superior e inferior
+	_setup_fade_overlays()
 
 func _process(delta):
 	# Animación de Pulso Rítmico Sincronizado para el Título del Menú Principal
 	if _menu_node:
-		var title_lbl = _menu_node.find_child("MenuTitle", true, false)
-		var title_shadow = _menu_node.find_child("MenuTitleShadow", true, false)
-		if title_lbl and title_shadow:
-			# Decaer sutilmente el pulso del latido hacia 0 en cada fotograma
-			_title_beat_pulse = lerp(_title_beat_pulse, 0.0, 1.0 - exp(-10.0 * delta))
-			if _title_beat_pulse < 0.005:
-				_title_beat_pulse = 0.0
+		# Decaer sutilmente el pulso del latido hacia 0 en cada fotograma
+		_title_beat_pulse = lerp(_title_beat_pulse, 0.0, 1.0 - exp(-10.0 * delta))
+		if _title_beat_pulse < 0.005:
+			_title_beat_pulse = 0.0
+
+		for half in _menu_node.get_children():
+			var title_lbl = half.find_child("MenuTitle", true, false)
+			var title_shadow = half.find_child("MenuTitleShadow", true, false)
+			if title_lbl and title_shadow:
+				# El título de delante permanece perfectamente estático, elegante y quieto
+				title_lbl.position = Vector2(0, 90)
+				title_lbl.rotation = 0.0
+				title_lbl.scale = Vector2.ONE
 				
-			# El título de delante permanece perfectamente estático, elegante y quieto
-			title_lbl.position = Vector2(0, 90)
-			title_lbl.rotation = 0.0
-			title_lbl.scale = Vector2.ONE
-			
-			# La sombra proyectada detrás es la que late al compás de la música (efecto aura/proyección rítmica por letra)
-			title_shadow.position = Vector2(0, 90)
-			title_shadow.rotation = 0.0
-			title_shadow.scale = Vector2.ONE
-			
-			var shadow_scale = 1.05 + _title_beat_pulse * 1.2
-			var shadow_vbox = title_shadow.find_child("VBox", true, false)
-			if shadow_vbox:
-				for line_node in shadow_vbox.get_children():
-					if line_node is HBoxContainer:
-						for char_node in line_node.get_children():
-							if char_node is Label:
-								char_node.scale = Vector2(shadow_scale, shadow_scale)
+				# La sombra proyectada detrás es la que late al compás de la música (efecto aura/proyección rítmica por letra)
+				title_shadow.position = Vector2(0, 90)
+				title_shadow.rotation = 0.0
+				title_shadow.scale = Vector2.ONE
+				
+				var shadow_scale = 1.05 + _title_beat_pulse * 1.2
+				var shadow_vbox = title_shadow.find_child("VBox", true, false)
+				if shadow_vbox:
+					for line_node in shadow_vbox.get_children():
+						if line_node is HBoxContainer:
+							for char_node in line_node.get_children():
+								if char_node is Label:
+									char_node.scale = Vector2(shadow_scale, shadow_scale)
 			
 			# Detección adaptativa de ritmo ultra-sensible para la intro suave (primeros 8 segundos)
 			# Nota: Analizamos la frecuencia de 20Hz a 300Hz para capturar todo el subgrave y bajo de la intro.
@@ -245,22 +262,241 @@ func _process(delta):
 		if _battery_bar:
 			_battery_bar.queue_redraw()
 			
-	# Procesamiento continuo de dibujo o retracción
-	if is_drawing:
-		_seeking_delay_timer = 0.5
-		_seeking_bend_angle = 0.0
-		try_add_point(get_global_mouse_position())
-	elif is_retracting:
-		_seeking_delay_timer = 0.5
-		_seeking_bend_angle = 0.0
-		retract_root()
+	# Procesamiento continuo de dibujo o retracción (bloqueado si el Power-up de Infinito está activo)
+	if infinity_powerup_active:
+		# Mantener savia a tope
+		sap = MAX_SAP
+		
+		# Si hay un delay inicial de transición suave
+		if infinity_start_delay > 0.0:
+			infinity_start_delay -= delta
+			camera.position.y = lerp(camera.position.y, auto_descent_tip_pos.y - 324.0, 0.1)
+			
+			# Atracción magnética y recolección durante la transición
+			for reward in rewards_container.get_children():
+				if reward.is_queued_for_deletion() or reward.has_meta("dying"):
+					continue
+				var reward_center = reward.position + reward.size / 2.0
+				var r_dist = auto_descent_tip_pos.distance_to(reward_center)
+				if r_dist < 450:
+					reward.position = reward.position.lerp(auto_descent_tip_pos, 1.0 - exp(-15.0 * delta))
+				if r_dist < 48:
+					_collect_reward_programmatically(reward)
+			return
+		
+		# Seguir la punta de la raíz de manera suave y fluida
+		camera.position.y = lerp(camera.position.y, auto_descent_tip_pos.y - 324.0, 0.15)
+			
+		# Avanzar el camino de descenso automático de forma ultra fluida
+		if auto_descent_index < auto_descent_points.size():
+			var target_pt = auto_descent_points[auto_descent_index]
+			var to_target = target_pt - auto_descent_tip_pos
+			var dist = to_target.length()
+			
+			var speed = 900.0 # Píxeles por segundo para un descenso rápido pero visible y suave
+			var step = speed * delta
+			if step >= dist:
+				# Llegar al punto de la cuadrícula
+				auto_descent_tip_pos = target_pt
+				current_path.append(target_pt)
+				
+				# Eliminar bloques grises en el camino de forma vistosa
+				for obs in obstacles.get_children():
+					if obs is ColorRect and not obs.has_meta("dying"):
+						var rect = Rect2(obs.position, obs.size)
+						if rect.has_point(target_pt):
+							obs.set_meta("dying", true)
+							var t_obs = create_tween()
+							t_obs.tween_property(obs, "scale", Vector2.ZERO, 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+							t_obs.tween_callback(obs.queue_free)
+							
+				auto_descent_index += 1
+			else:
+				# Avanzar suavemente hacia el siguiente punto
+				auto_descent_tip_pos += to_target.normalized() * step
+				
+			# Actualizar los puntos del root_line
+			var display_points = current_path.duplicate()
+			if display_points.size() > 0:
+				if auto_descent_tip_pos != display_points[-1]:
+					display_points.append(auto_descent_tip_pos)
+			root_line.points = display_points
+			
+			# Atraer/recolectar recompensas basadas en la posición fluida de la punta
+			for reward in rewards_container.get_children():
+				if reward.is_queued_for_deletion() or reward.has_meta("dying"):
+					continue
+				var reward_center = reward.position + reward.size / 2.0
+				var r_dist = auto_descent_tip_pos.distance_to(reward_center)
+				if r_dist < 450:
+					# Atracción magnética
+					reward.position = reward.position.lerp(auto_descent_tip_pos, 1.0 - exp(-15.0 * delta))
+				if r_dist < 48:
+					_collect_reward_programmatically(reward)
+		else:
+			# Fin del trayecto del Power-up de Infinito
+			infinity_powerup_active = false
+			
+			var final_pt = auto_descent_points[-1]
+			
+
+			# Desvanecer la línea de dibujo del descenso (root_line) de brillante dorado a dorado apagado (mismo apagado que el normal)
+			var old_descent_line = root_line
+			var t_fade_line = create_tween().set_parallel(true)
+			t_fade_line.tween_property(old_descent_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
+			
+			# Crear y animar el enroscado gris (hélice) en toda la línea de bajada
+			var descent_helix = create_wrapping_helix(current_path)
+			roots_container.add_child(descent_helix)
+			var descent_full_points = descent_helix.points
+			descent_helix.points = []
+			
+			t_fade_line.tween_method(func(pct: float):
+				if is_instance_valid(descent_helix):
+					var count = int(pct * descent_full_points.size())
+					descent_helix.points = descent_full_points.slice(0, count)
+			, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+			
+			# Hacer brotar los pinchitos/espinas físicas en todo el camino del descenso
+			spawn_growing_thorns(current_path, 0.0, 1.0)
+			
+			for p in current_path:
+				all_previous_paths.append(p)
+				_occupied_previous_points[p] = true
+				
+			# Eliminar los retratos viejos (ancestor y descendant)
+			if ancestor:
+				ancestor.queue_free()
+			if descendant:
+				descendant.queue_free()
+				
+			# Instanciar el Hijo único (child) al final de la caída
+			var child = PortraitFrame.new()
+			child.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
+			child.position = final_pt - child.size / 2.0
+			
+			# 50/50 probabilidad de color/género
+			var is_boy = randf() > 0.5
+			if is_boy:
+				child.color = Color(0, 0.8, 1, 1) # Azul
+			else:
+				child.color = Color(1, 0, 0.8, 1) # Rosa
+				
+			child.z_index = 10
+			child.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			child.pivot_offset = child.size / 2.0
+			child.scale = Vector2.ZERO
+			add_child(child)
+			
+			# Animar la aparición del Hijo de forma elástica
+			var t_child = create_tween()
+			t_child.tween_property(child, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			
+			ancestor = child
+			
+			# Instanciar la nueva Pareja (partner) cerca del hijo
+			var new_partner = PortraitFrame.new()
+			new_partner.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
+			
+			var offset_cells_x = randi_range(10, 16)
+			var offset_cells_y = randi_range(-2, 4)
+			
+			var target_x = 0
+			if child.position.x < 1152 / 2.0:
+				target_x = child.position.x + offset_cells_x * GRID_SIZE
+			else:
+				target_x = child.position.x - offset_cells_x * GRID_SIZE
+			target_x = clamp(target_x, GRID_SIZE * 4, 1152 - GRID_SIZE * 4)
+			
+			var partner_grid_center = get_grid_pos(Vector2(target_x, final_pt.y + offset_cells_y * GRID_SIZE))
+			new_partner.position = partner_grid_center - Vector2(GRID_SIZE * 1.5, GRID_SIZE * 1.5)
+			
+			if is_boy:
+				new_partner.color = Color(1, 0, 0.8, 1) # Rosa (opuesto)
+			else:
+				new_partner.color = Color(0, 0.8, 1, 1) # Azul (opuesto)
+				
+			new_partner.z_index = 10
+			new_partner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			new_partner.pivot_offset = new_partner.size / 2.0
+			new_partner.scale = Vector2.ZERO
+			add_child(new_partner)
+			
+			# Animar la pareja de forma elástica
+			var t_part = create_tween()
+			t_part.tween_property(new_partner, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			
+			descendant = new_partner
+			
+			# Generar de forma normal todo el contenido procedural (bloques, corazones, etc.) para el nuevo nivel
+			var line_clear_rect = Rect2(
+				Vector2(final_pt.x - GRID_SIZE, final_pt.y - 85 * GRID_SIZE),
+				Vector2(GRID_SIZE * 2, 90 * GRID_SIZE)
+			)
+			generate_procedural_generation_content(child, new_partner, final_pt, partner_grid_center, line_clear_rect)
+			
+			# Iniciar la nueva línea de dibujo desde el hijo
+			root_line = Line2D.new()
+			root_line.width = GRID_SIZE * 0.4
+			root_line.default_color = Color(1, 0.9, 0, 1)
+			root_line.joint_mode = Line2D.LINE_JOINT_ROUND
+			root_line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+			root_line.end_cap_mode = Line2D.LINE_CAP_ROUND
+			roots_container.add_child(root_line)
+			
+			current_path.clear()
+			var start_pos = get_grid_pos(ancestor.position + ancestor.size / 2.0)
+			current_path.append(start_pos)
+			root_line.points = current_path
+			
+			# Restaurar velocidad de cámara (con un pequeño incremento por nivel completado)
+			target_camera_speed = pre_powerup_camera_speed + 5.0
+			camera_speed = target_camera_speed
+			
+			# Limpieza de memoria de obstáculos/recompensas/retratos antiguos lejanos
+			var limit_y = camera.position.y - 1500
+			for obs in obstacles.get_children():
+				if obs.position.y < limit_y:
+					obs.queue_free()
+			for reward in rewards_container.get_children():
+				if reward.position.y < limit_y:
+					reward.queue_free()
+			for node in get_children():
+				if node is PortraitFrame and node != child and node != new_partner:
+					if node.position.y < limit_y:
+						node.queue_free()
+			for line in roots_container.get_children():
+				if line is Line2D and line != root_line:
+					if line.points.size() > 0 and line.points[-1].y < limit_y:
+						line.queue_free()
+			var filtered_paths: Array[Vector2] = []
+			_occupied_previous_points.clear()
+			for p in all_previous_paths:
+				if p.y > limit_y:
+					filtered_paths.append(p)
+					_occupied_previous_points[p] = true
+			all_previous_paths = filtered_paths
+			
+			sap = MAX_SAP
+			generation += 1
+			update_ui()
 	else:
-		# Si no está dibujando ni borrando, hacer que la punta de la raíz busque orgánicamente al cursor
-		if not in_menu and not game_over and not waiting_for_next:
-			_seeking_delay_timer = max(0.0, _seeking_delay_timer - delta)
-			_update_seeking_tip(delta)
-	# Procesar el temporizador del Reloj de Arena (⏳) y su velocidad ralentizada
-	if hourglass_time_left > 0.0:
+		if is_drawing:
+			_seeking_delay_timer = 0.5
+			_seeking_bend_angle = 0.0
+			try_add_point(get_global_mouse_position())
+		elif is_retracting:
+			_seeking_delay_timer = 0.5
+			_seeking_bend_angle = 0.0
+			retract_root()
+		else:
+			# Si no está dibujando ni borrando, hacer que la punta de la raíz busque orgánicamente al cursor
+			if not in_menu and not game_over and not waiting_for_next:
+				_seeking_delay_timer = max(0.0, _seeking_delay_timer - delta)
+				_update_seeking_tip(delta)
+				
+	# Procesar el temporizador del Reloj de Arena (⏳) y su velocidad ralentizada (solo si no estamos en power-up)
+	if hourglass_time_left > 0.0 and not infinity_powerup_active:
 		hourglass_time_left = max(0.0, hourglass_time_left - delta)
 		
 		if hourglass_time_left <= 0.0:
@@ -295,18 +531,21 @@ func _process(delta):
 		var target_slow_speed = max(10.0, target_camera_speed * slow_factor)
 		camera_speed = lerp(camera_speed, target_slow_speed, 1.0 - exp(-4.0 * delta))
 	else:
-		if _hourglass_ui and _hourglass_ui.visible and _hourglass_ui.scale.x > 0.0:
-			# Animación de Salida Elástica
-			var t_hide = create_tween().set_parallel(true)
-			t_hide.tween_property(_hourglass_ui, "scale", Vector2.ZERO, 0.4).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
-			t_hide.tween_property(_hourglass_ui, "modulate:a", 0.0, 0.3).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
-			t_hide.chain().tween_callback(_hourglass_ui.hide)
-			
-		# Recuperación progresiva original de la velocidad
-		if camera_speed < target_camera_speed:
-			camera_speed = lerp(camera_speed, target_camera_speed, 1.0 - exp(-0.6 * delta))
-			if target_camera_speed - camera_speed < 0.2:
-				camera_speed = target_camera_speed
+		if not infinity_powerup_active:
+			if hourglass_time_left > 0.0:
+				hourglass_time_left = max(0.0, hourglass_time_left - delta)
+			if _hourglass_ui and _hourglass_ui.visible and _hourglass_ui.scale.x > 0.0:
+				# Animación de Salida Elástica
+				var t_hide = create_tween().set_parallel(true)
+				t_hide.tween_property(_hourglass_ui, "scale", Vector2.ZERO, 0.4).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				t_hide.tween_property(_hourglass_ui, "modulate:a", 0.0, 0.3).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+				t_hide.chain().tween_callback(_hourglass_ui.hide)
+				
+			# Recuperación progresiva original de la velocidad
+			if camera_speed < target_camera_speed:
+				camera_speed = lerp(camera_speed, target_camera_speed, 1.0 - exp(-0.6 * delta))
+				if target_camera_speed - camera_speed < 0.2:
+					camera_speed = target_camera_speed
 
 	if not waiting_for_next and first_union_made:
 		# Mover cámara implacablemente hacia abajo
@@ -381,7 +620,7 @@ func _process(delta):
 	# Si la pareja sigue en pantalla, el jugador SIEMPRE tiene la oportunidad de salvarse (usando el click derecho para retraer la raíz si se quedó atascada arriba).
 	var destination_lost = (descendant.position.y + descendant.size.y) < limit_y
 	
-	if destination_lost and not game_over:
+	if destination_lost and not game_over and not infinity_powerup_active:
 		trigger_game_over(false, true)
 			
 	# Redibujar la cuadrícula en cada frame para que acompañe a la cámara
@@ -540,7 +779,7 @@ func _draw():
 		draw_line(Vector2(0, y), Vector2(1152, y), grid_color, 1.0)
 
 func _input(event):
-	if game_over or waiting_for_next or in_menu:
+	if game_over or waiting_for_next or in_menu or infinity_powerup_active:
 		return
 		
 	if event is InputEventMouseButton:
@@ -571,7 +810,7 @@ func _input(event):
 			is_drawing = false
 
 func try_add_point(mouse_pos: Vector2):
-	if sap <= 0 or game_over or waiting_for_next:
+	if sap <= 0 or game_over or waiting_for_next or infinity_powerup_active:
 		return
 		
 	var grid_pos = get_grid_pos(mouse_pos)
@@ -611,6 +850,138 @@ func fill_path_to(target_grid_pos: Vector2):
 		if not moved:
 			break # Detener si chocamos o nos quedamos sin savia
 		step += 1
+
+func generate_infinity_content(from_y: float, to_y: float):
+	# Delimitar región
+	var start_y_grid = int(from_y / GRID_SIZE)
+	var end_y_grid = int(to_y / GRID_SIZE)
+	
+	# Instanciar astar temporal para verificar accesibilidad
+	var astar = AStarGrid2D.new()
+	var max_grid_x = floor(1152 / GRID_SIZE)
+	astar.region = Rect2i(0, start_y_grid, max_grid_x, end_y_grid - start_y_grid + 1)
+	astar.cell_size = Vector2(GRID_SIZE, GRID_SIZE)
+	astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
+	astar.update()
+	
+	# Marcar obstáculos existentes como sólidos
+	for obs in obstacles.get_children():
+		if obs.is_queued_for_deletion() or obs.has_meta("dying"): continue
+		var coord = Vector2i(round(obs.position.x / GRID_SIZE), round(obs.position.y / GRID_SIZE))
+		if astar.region.has_point(coord):
+			astar.set_point_solid(coord, true)
+			
+	# Generar obstáculos (60 a 100 bloques)
+	var num_obstacles = randi_range(60, 100)
+	var placed_obstacles = []
+	for i in range(num_obstacles):
+		var rx = randi_range(2, max_grid_x - 3)
+		# Dejar margen
+		var ry = randi_range(start_y_grid + 2, end_y_grid - 4)
+		var cell = Vector2i(rx, ry)
+		
+		# No bloquear la columna central del todo
+		if cell.x >= 17 and cell.x <= 19 and randf() > 0.3:
+			continue
+			
+		if astar.is_point_solid(cell):
+			continue
+			
+		astar.set_point_solid(cell, true)
+		placed_obstacles.append(cell)
+		
+	# Dibujar los obstáculos
+	for cell in placed_obstacles:
+		var obs = ColorRect.new()
+		obs.size = Vector2(GRID_SIZE, GRID_SIZE)
+		obs.position = Vector2(cell.x * GRID_SIZE, cell.y * GRID_SIZE)
+		obs.color = Color(0.25, 0.25, 0.25, 1)
+		obs.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		obs.pivot_offset = obs.size / 2.0
+		obs.scale = Vector2.ZERO
+		obstacles.add_child(obs)
+		var t = create_tween()
+		t.tween_property(obs, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(randf_range(0.0, 0.3))
+		
+	# Generar recompensas (Savia y Corazones)
+	var num_rewards = randi_range(15, 25)
+	for i in range(num_rewards):
+		var rx = randi_range(2, max_grid_x - 3)
+		var ry = randi_range(start_y_grid + 2, end_y_grid - 4)
+		var cell = Vector2i(rx, ry)
+		
+		if not astar.is_point_solid(cell):
+			var r_type = "green_heart"
+			var roll = randf()
+			if roll < 0.75:
+				r_type = "green_heart"
+			elif roll < 0.95:
+				r_type = "red_heart"
+			else:
+				r_type = "hourglass"
+				
+			var reward = Panel.new()
+			reward.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
+			reward.position = Vector2(cell.x * GRID_SIZE + GRID_SIZE * 0.15, cell.y * GRID_SIZE + GRID_SIZE * 0.15)
+			
+			var style = StyleBoxFlat.new()
+			var icon_rect = TextureRect.new()
+			icon_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+			icon_rect.grow_horizontal = Control.GROW_DIRECTION_BOTH
+			icon_rect.grow_vertical = Control.GROW_DIRECTION_BOTH
+			icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			icon_rect.offset_left = 4
+			icon_rect.offset_right = -4
+			icon_rect.offset_top = 4
+			icon_rect.offset_bottom = -4
+			
+			if r_type == "green_heart":
+				reward.set_meta("type", "green_heart")
+				style.bg_color = Color(0.02, 0.15, 0.05, 1.0) # Fondo verde bosque oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(0.1, 0.9, 0.1, 1.0) # Borde verde neón brillante
+				style.shadow_color = Color(0.1, 0.9, 0.1, 0.4) # Billo neón verde
+				style.shadow_size = 6
+				icon_rect.texture = load("res://assets/icon_heart_green.png")
+			elif r_type == "red_heart":
+				reward.set_meta("type", "red_heart")
+				style.bg_color = Color(0.18, 0.02, 0.05, 1.0) # Fondo carmesí oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(1.0, 0.2, 0.2, 1.0) # Borde rojo neón brillante
+				style.shadow_color = Color(1.0, 0.2, 0.2, 0.45) # Brillo rojo neón
+				style.shadow_size = 6
+				icon_rect.texture = load("res://assets/icon_heart_red.png")
+			else: # hourglass
+				reward.set_meta("type", "hourglass")
+				style.bg_color = Color(0.12, 0.05, 0.22, 1.0) # Fondo índigo oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(0.75, 0.35, 1.0, 1.0) # Borde violeta neón
+				style.shadow_color = Color(0.75, 0.35, 1.0, 0.45) # Brillo violeta neón
+				style.shadow_size = 6
+				icon_rect.texture = load("res://assets/icon_hourglass.png")
+				
+			reward.add_theme_stylebox_override("panel", style)
+			reward.add_child(icon_rect)
+			
+			reward.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			reward.pivot_offset = reward.size / 2.0
+			reward.scale = Vector2.ZERO
+			rewards_container.add_child(reward)
+			
+			var t = create_tween()
+			t.tween_property(reward, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(randf_range(0.0, 0.3))
+			
+			astar.set_point_solid(cell, true)
 
 func try_add_single_point(grid_pos: Vector2) -> bool:
 	if sap <= 0:
@@ -669,6 +1040,87 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				t_lbl.tween_property(slow_lbl, "position:y", slow_lbl.position.y - 48.0, 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 				t_lbl.tween_property(slow_lbl, "modulate:a", 0.0, 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN).set_delay(0.2)
 				t_lbl.chain().tween_callback(slow_lbl.queue_free)
+				
+			if reward.has_meta("type") and reward.get_meta("type") == "infinity":
+				# Activar Power-up de Infinito
+				infinity_powerup_active = true
+				infinity_start_delay = 0.5
+				pre_powerup_camera_speed = target_camera_speed
+				
+				# Cancelar dibujo actual
+				is_drawing = false
+				is_retracting = false
+				
+				# Animar desvanecimiento elástico de los padres (retratos actuales)
+				var t_fade = create_tween().set_parallel(true)
+				if ancestor:
+					t_fade.tween_property(ancestor, "scale", Vector2.ZERO, 0.4).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				if descendant:
+					t_fade.tween_property(descendant, "scale", Vector2.ZERO, 0.4).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				
+				# Cambiar color de la línea actual del jugador a atenuada
+				var old_line = root_line
+				var t_fade_line = create_tween()
+				t_fade_line.tween_property(old_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 0.4)
+				
+				# Registrar los puntos en las colisiones antiguas
+				for p in current_path:
+					all_previous_paths.append(p)
+					_occupied_previous_points[p] = true
+				
+				# Iniciar la nueva línea brillante para el descenso
+				var start_pt = get_grid_pos(reward.position + reward.size / 2.0)
+				current_path.clear()
+				current_path.append(start_pt)
+				
+				root_line = Line2D.new()
+				root_line.width = GRID_SIZE * 0.4
+				root_line.default_color = Color(1.0, 0.9, 0.0, 1.0) # Brilla dorado
+				root_line.joint_mode = Line2D.LINE_JOINT_ROUND
+				root_line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+				root_line.end_cap_mode = Line2D.LINE_CAP_ROUND
+				roots_container.add_child(root_line)
+				root_line.points = current_path
+				
+				# Generar el contenido procedimental del descenso (obstáculos y corazones)
+				generate_infinity_content(descendant.position.y, descendant.position.y + 77 * GRID_SIZE)
+				
+				# Generar el camino de descenso automático
+				var start_cell = get_grid_coord(start_pt)
+				
+				# Ir hacia abajo y al centro (x = 18) en 12 celdas
+				var target_center_row = start_cell.y + 12
+				
+				# AStar temporal sin obstáculos
+				var temp_astar = AStarGrid2D.new()
+				var min_y = start_cell.y
+				var max_y = target_center_row
+				var min_x = min(start_cell.x, 18)
+				var max_x = max(start_cell.x, 18)
+				temp_astar.region = Rect2i(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+				temp_astar.cell_size = Vector2(GRID_SIZE, GRID_SIZE)
+				temp_astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
+				temp_astar.update()
+				
+				var path_cells = temp_astar.get_id_path(start_cell, Vector2i(18, target_center_row))
+				auto_descent_points.clear()
+				for cell in path_cells:
+					auto_descent_points.append(get_grid_pos(Vector2(cell.x * GRID_SIZE, cell.y * GRID_SIZE)))
+					
+				if auto_descent_points.size() == 0:
+					auto_descent_points.append(start_pt)
+					
+				# Continuar recto hacia abajo (65 celdas más para un total de 77)
+				var total_descent_y = start_cell.y + 77
+				for y in range(target_center_row + 1, total_descent_y + 1):
+					auto_descent_points.append(get_grid_pos(Vector2(18 * GRID_SIZE, y * GRID_SIZE)))
+					
+				auto_descent_tip_pos = start_pt
+				auto_descent_index = 1
+				
+				# Desactivar la velocidad de scroll normal para que la cámara siga a la raíz
+				camera_speed = 0.0
+				target_camera_speed = 0.0
 				
 				reward.queue_free()
 				continue
@@ -856,15 +1308,16 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 	is_retracting = false
 	
 	if win:
-		# Preservar el ratio de ralentización del reloj de arena si está activo
-		var slow_ratio = 1.0
-		if target_camera_speed > 0.0:
-			slow_ratio = camera_speed / target_camera_speed
+		if not infinity_powerup_active:
+			# Preservar el ratio de ralentización del reloj de arena si está activo
+			var slow_ratio = 1.0
+			if target_camera_speed > 0.0:
+				slow_ratio = camera_speed / target_camera_speed
+				
+			target_camera_speed += 5.0 # Acelerar la velocidad objetivo con cada victoria
 			
-		target_camera_speed += 5.0 # Acelerar la velocidad objetivo con cada victoria
-		
-		# Mantener el efecto de tiempo lento de forma fluida en la nueva generación
-		camera_speed = target_camera_speed * slow_ratio
+			# Mantener el efecto de tiempo lento de forma fluida en la nueva generación
+			camera_speed = target_camera_speed * slow_ratio
 		
 		start_next_generation()
 	else:
@@ -873,17 +1326,8 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 		if _battery_bar:
 			_battery_bar.queue_redraw()
 			
-		# Ocultar todos los elementos de gameplay del mundo para dejar la pantalla de derrota 100% limpia y aislada
-		if roots_container:
-			roots_container.hide()
-		if obstacles:
-			obstacles.hide()
-		if rewards_container:
-			rewards_container.hide()
-		if ancestor:
-			ancestor.hide()
-		if descendant:
-			descendant.hide()
+		# Los elementos permanecen en el mundo y se desplazan naturalmente fuera de la pantalla al bajar la cámara
+
 		
 		# Ocultar cualquier texto plano viejo
 		if message_label:
@@ -904,13 +1348,13 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 				else:
 					score_lbl.text = "PUNTUACIÓN: " + str(final_score) + "\n(Puntos: " + str(green_squares_collected) + " × Gen: " + str(generation) + ")"
 				
-			# Posicionar por debajo de la cámara actual con holgura extra (+700.0) para ocultar restos del gameplay
-			_classification_area.position = Vector2(0, camera.position.y + 700.0)
+			# Posicionar por debajo de la cámara actual con holgura extra (+1200.0) para ocultar restos del gameplay
+			_classification_area.position = Vector2(0, camera.position.y + 1200.0)
 			_classification_area.modulate.a = 0.0
 			_classification_area.show()
 			
 			var t = create_tween().set_parallel(true)
-			t.tween_property(camera, "position:y", camera.position.y + 700.0, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+			t.tween_property(camera, "position", Vector2(0.0, camera.position.y + 1200.0), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 			t.tween_property(_classification_area, "modulate:a", 1.0, 1.2).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 			
 			# Animar el desvanecimiento elegante de la UI de juego para que no flote en la clasificación
@@ -927,236 +1371,13 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 				t.tween_property(_green_score_label, "scale", Vector2.ZERO, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
 				t.tween_property(_green_score_label, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
-func start_next_generation():
-	waiting_for_next = false
-	
-	# Si es la primera unión, activar contrareloj, dar paso al drop de música y limpiar tutorial
-	if not first_union_made:
-		first_union_made = true
-		if _music_player and _music_player.playing:
-			_music_player.seek(16.0) # ¡El bombo Phonk revienta con el drop!
-		
-		# Animar la entrada de la barra de savia y del combo de generación de forma elástica y premium
-		var ui_tween = create_tween().set_parallel(true)
-		if _battery_bar:
-			ui_tween.tween_property(_battery_bar, "scale", Vector2.ONE, 0.8).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-			ui_tween.tween_property(_battery_bar, "modulate:a", 1.0, 0.6).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		if _generation_combo:
-			ui_tween.tween_property(_generation_combo, "scale", Vector2.ONE, 0.8).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-			ui_tween.tween_property(_generation_combo, "modulate:a", 1.0, 0.6).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		if _green_score_label:
-			ui_tween.tween_property(_green_score_label, "scale", Vector2.ONE, 0.8).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-			ui_tween.tween_property(_green_score_label, "modulate:a", 1.0, 0.6).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		
-		# Limpiar nodos del tutorial de forma segura
-		if _tutorial_line:
-			_tutorial_line.queue_free()
-			_tutorial_line = null
-		if _tutorial_cursor:
-			_tutorial_cursor.queue_free()
-			_tutorial_cursor = null
-		if _mechanics_tutorial_panel:
-			var t_panel = create_tween()
-			t_panel.set_parallel(true)
-			t_panel.tween_property(_mechanics_tutorial_panel, "modulate:a", 0.0, 0.4).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-			t_panel.tween_property(_mechanics_tutorial_panel, "position:y", _mechanics_tutorial_panel.position.y + 50.0, 0.4).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
-			t_panel.chain().tween_callback(_mechanics_tutorial_panel.queue_free)
-			_mechanics_tutorial_panel = null
-		if _sap_tutorial_panel:
-			var t_sap = create_tween()
-			t_sap.set_parallel(true)
-			t_sap.tween_property(_sap_tutorial_panel, "modulate:a", 0.0, 0.4).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-			t_sap.tween_property(_sap_tutorial_panel, "position:y", _sap_tutorial_panel.position.y + 50.0, 0.4).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
-			t_sap.chain().tween_callback(_sap_tutorial_panel.queue_free)
-			_sap_tutorial_panel = null
-			
-	# Guardar la ruta actual en el historial de colisiones
-	all_previous_paths.append_array(current_path)
-	for p in current_path:
-		_occupied_previous_points[p] = true
-	
-	# --- CÁLCULO DE branch_point Y child_grid_center AL INICIO ---
-	var current_y = descendant.position.y
-	var mid_x = (ancestor.position.x + descendant.position.x) / 2.0
-	
-	# Encontrar el punto de la ruta más cercano al CENTRO HORIZONTAL entre los padres.
-	var branch_point = current_path[0]
-	var min_dist_to_center = 999999.0
-	var local_max_y = -999999.0
-	
-	for p in current_path:
-		var dist = abs(p.x - mid_x)
-		if dist < min_dist_to_center - 10: # Mejorar si se acerca significativamente al centro
-			min_dist_to_center = dist
-			local_max_y = p.y
-			branch_point = p
-		elif abs(dist - min_dist_to_center) <= 10: # Si está igual de centrado, preferir el más profundo
-			if p.y > local_max_y:
-				local_max_y = p.y
-				branch_point = p
-				
-	# Encontrar la profundidad MÁXIMA ABSOLUTA de toda la ruta para el nuevo hijo
-	var absolute_max_y = current_path[0].y
-	for p in current_path:
-		if p.y > absolute_max_y:
-			absolute_max_y = p.y
-	
-	# Instanciar al Hijo (alineado al centro y por debajo del todo)
-	var child_grid_center = get_grid_pos(Vector2(branch_point.x, absolute_max_y + 6 * GRID_SIZE))
-	# -------------------------------------------------------------
-	
-	# 1. Encontrar el índice del branch_point en el camino
-	var branch_idx = 0
-	var min_dist = 99999.0
-	for idx in range(current_path.size()):
-		var d = current_path[idx].distance_to(branch_point)
-		if d < min_dist:
-			min_dist = d
-			branch_idx = idx
-			
-	# Dividir en dos caminos que nacen en los padres y terminan en el branch_point
-	var path1 = current_path.slice(0, branch_idx + 1)
-	var path2 = current_path.slice(branch_idx, current_path.size())
-	path2.reverse() # Invertir para que crezca desde el descendiente hacia el branch
-	
-	# Crear las dos hélices horizontales
-	var helix1 = create_wrapping_helix(path1)
-	var helix2 = create_wrapping_helix(path2)
-	roots_container.add_child(helix1)
-	roots_container.add_child(helix2)
-	
-	var full_p1 = helix1.points
-	var full_p2 = helix2.points
-	helix1.points = []
-	helix2.points = []
-	
-	# Cambiar color de raíces y retratos antiguos a un tono oscuro gradualmente usando un Tween
-	var tween = create_tween()
-	tween.set_parallel(true)
-	# La línea pasa a un tono amarillo dorado atenuado y semi-transparente
-	tween.tween_property(root_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
-	tween.tween_property(ancestor, "color", ancestor.color.darkened(0.5), 1.0)
-	tween.tween_property(descendant, "color", descendant.color.darkened(0.5), 1.0)
-	
-	# Fase 1: Animar el crecimiento físico simultáneo desde ambos padres al branch_point (1.0s)
-	if full_p1.size() > 0:
-		tween.tween_method(func(pct: float):
-			var count = int(pct * full_p1.size())
-			helix1.points = full_p1.slice(0, count)
-		, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		
-	if full_p2.size() > 0:
-		tween.tween_method(func(pct: float):
-			var count = int(pct * full_p2.size())
-			helix2.points = full_p2.slice(0, count)
-		, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
-		
-	# Hacer crecer los pinchitos/espinas físicas en los caminos horizontales al paso de la espiral
-	spawn_growing_thorns(path1, 0.0, 1.0)
-	spawn_growing_thorns(path2, 0.0, 1.0)
-	
-	# Desactivar animaciones (respiración y cabeceo) de los padres que acaban de pasar a la historia
-	ancestor.active = false
-	descendant.active = false
-	
-	var child = PortraitFrame.new()
-	child.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
-	child.position = child_grid_center - Vector2(GRID_SIZE * 1.5, GRID_SIZE * 1.5)
-	
-	# 50/50 de probabilidad de ser hombre o mujer
-	var is_boy = randf() > 0.5
-	if is_boy:
-		child.color = Color(0, 0.8, 1, 1) # Azul
-	else:
-		child.color = Color(1, 0, 0.8, 1) # Rosa
-		
-	child.z_index = 10 # Siempre por encima de las raíces
-	child.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	child.pivot_offset = child.size / 2.0
-	child.scale = Vector2.ZERO
-	add_child(child)
-	tween.tween_property(child, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	
-	var descent_line = Line2D.new()
-	descent_line.width = GRID_SIZE * 0.4
-	descent_line.default_color = Color(1, 0.9, 0, 1) # Nace brillante
-	descent_line.add_point(branch_point)
-	descent_line.add_point(child_grid_center)
-	roots_container.add_child(descent_line)
-	
-	# 2. Enroscar hélice en la línea de bajada también
-	var descent_helix = create_wrapping_helix([branch_point, child_grid_center])
-	roots_container.add_child(descent_helix)
-	
-	var descent_full_points = descent_helix.points
-	descent_helix.points = []
-	
-	tween.tween_property(descent_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
-	
-	# Fase 2: Animar el crecimiento progresivo de la hélice vertical (desde el branch_point hacia el hijo) tras el encuentro (delay 1.0s)
-	if descent_full_points.size() > 0:
-		tween.tween_method(func(pct: float):
-			var count = int(pct * descent_full_points.size())
-			descent_helix.points = descent_full_points.slice(0, count)
-		, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT).set_delay(1.0)
-		
-	# Hacer crecer los pinchitos/espinas físicas en el camino vertical descendente
-	spawn_growing_thorns([branch_point, child_grid_center], 1.0, 1.0)
-	
-	# Añadir la línea vertical al historial de colisiones antiguas y destruir obstáculos en su camino
-	var start_y_grid = int(branch_point.y / GRID_SIZE)
-	var end_y_grid = int(child_grid_center.y / GRID_SIZE)
-	var branch_x_grid = int(branch_point.x / GRID_SIZE)
-	
-	# Hacemos que la línea vertical sea sólida hasta el borde superior del retrato (end_y_grid - 1)
-	# Esto evita que se crucen o solapen raíces antiguas directamente sobre el marco del personaje.
-	for y in range(start_y_grid, end_y_grid - 1):
-		var pos = get_grid_pos(Vector2(branch_x_grid * GRID_SIZE, y * GRID_SIZE))
-		all_previous_paths.append(pos)
-		_occupied_previous_points[pos] = true
-	# Instanciar a la nueva Pareja (ya no en la misma línea estricta)
-	var new_partner = PortraitFrame.new()
-	new_partner.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
-	
-	var offset_cells_x = randi_range(10, 16)
-	var offset_cells_y = randi_range(-2, 4) # La pareja puede estar un poco más arriba o más abajo que el hijo
-	
-	var target_x = 0
-	if child.position.x < 1152 / 2.0:
-		target_x = child.position.x + offset_cells_x * GRID_SIZE
-	else:
-		target_x = child.position.x - offset_cells_x * GRID_SIZE
-		
-	target_x = clamp(target_x, GRID_SIZE * 4, 1152 - GRID_SIZE * 4) # Mayor margen en bordes para el 3x3
-	
-	var partner_grid_center = get_grid_pos(Vector2(target_x, child_grid_center.y + offset_cells_y * GRID_SIZE))
-	new_partner.position = partner_grid_center - Vector2(GRID_SIZE * 1.5, GRID_SIZE * 1.5)
-	
-	if is_boy:
-		new_partner.color = Color(1, 0, 0.8, 1) # Rosa
-	else:
-		new_partner.color = Color(0, 0.8, 1, 1) # Azul
-		
-	new_partner.z_index = 10 # Siempre por encima de las raíces
-	new_partner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	new_partner.pivot_offset = new_partner.size / 2.0
-	new_partner.scale = Vector2.ZERO
-	add_child(new_partner)
-	tween.tween_property(new_partner, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	
-	# --- NUEVA LÓGICA DE LIMPIEZA TOTAL ---
-	# Limpiar TODO lo que estorbe visual o físicamente a la nueva generación (tanto de la generación anterior como puestos en el editor)
-	# 1. El camino de la línea vertical entera (con margen ancho)
-	var line_clear_rect = Rect2(
-		Vector2(branch_point.x - GRID_SIZE, branch_point.y),
-		Vector2(GRID_SIZE * 2, child_grid_center.y - branch_point.y + GRID_SIZE)
-	)
-	
+func generate_procedural_generation_content(child: PortraitFrame, new_partner: PortraitFrame, child_grid_center: Vector2, partner_grid_center: Vector2, line_clear_rect: Rect2) -> void:
 	# 2. Las zonas seguras (5x5) alrededor del hijo y la pareja
 	var child_clear_rect = Rect2(child.position - Vector2(GRID_SIZE, GRID_SIZE), Vector2(GRID_SIZE * 5, GRID_SIZE * 5))
 	var partner_clear_rect = Rect2(new_partner.position - Vector2(GRID_SIZE, GRID_SIZE), Vector2(GRID_SIZE * 5, GRID_SIZE * 5))
 	
 	for obs in obstacles.get_children():
+		if obs.is_queued_for_deletion() or obs.has_meta("dying"): continue
 		var obs_rect = Rect2(obs.position, obs.size)
 		if obs_rect.intersects(line_clear_rect) or obs_rect.intersects(child_clear_rect) or obs_rect.intersects(partner_clear_rect):
 			obs.set_meta("dying", true)
@@ -1165,6 +1386,7 @@ func start_next_generation():
 			t.tween_callback(obs.queue_free)
 			
 	for rew in rewards_container.get_children():
+		if rew.is_queued_for_deletion() or rew.has_meta("dying"): continue
 		var rew_rect = Rect2(rew.position, rew.size)
 		if rew_rect.intersects(line_clear_rect) or rew_rect.intersects(child_clear_rect) or rew_rect.intersects(partner_clear_rect):
 			rew.set_meta("dying", true)
@@ -1281,21 +1503,9 @@ func start_next_generation():
 				var reward = Panel.new()
 				reward.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
 				reward.position = Vector2(cell.x * GRID_SIZE + GRID_SIZE * 0.15, cell.y * GRID_SIZE + GRID_SIZE * 0.15)
-				reward.set_meta("type", "heart")
 				
 				var style = StyleBoxFlat.new()
-				style.bg_color = Color(0.02, 0.15, 0.05, 1.0) # Fondo verde bosque oscuro
-				style.border_width_left = 2
-				style.border_width_top = 2
-				style.border_width_right = 2
-				style.border_width_bottom = 2
-				style.border_color = Color(0.1, 0.9, 0.1, 1.0) # Borde verde neón brillante
-				style.shadow_color = Color(0.1, 0.9, 0.1, 0.4) # Brillo neón verde
-				style.shadow_size = 6
-				reward.add_theme_stylebox_override("panel", style)
-				
 				var icon_rect = TextureRect.new()
-				icon_rect.texture = load("res://assets/icon_heart_green.png")
 				icon_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 				icon_rect.grow_horizontal = Control.GROW_DIRECTION_BOTH
 				icon_rect.grow_vertical = Control.GROW_DIRECTION_BOTH
@@ -1305,6 +1515,32 @@ func start_next_generation():
 				icon_rect.offset_right = -4
 				icon_rect.offset_top = 4
 				icon_rect.offset_bottom = -4
+				
+				# 50/50 de probabilidad entre Corazón Verde e Infinito Dorado
+				if randf() < 0.5:
+					reward.set_meta("type", "heart")
+					style.bg_color = Color(0.02, 0.15, 0.05, 1.0) # Fondo verde bosque oscuro
+					style.border_width_left = 2
+					style.border_width_top = 2
+					style.border_width_right = 2
+					style.border_width_bottom = 2
+					style.border_color = Color(0.1, 0.9, 0.1, 1.0) # Borde verde neón brillante
+					style.shadow_color = Color(0.1, 0.9, 0.1, 0.4) # Brillo neón verde
+					style.shadow_size = 6
+					icon_rect.texture = load("res://assets/icon_heart_green.png")
+				else:
+					reward.set_meta("type", "infinity")
+					style.bg_color = Color(0.15, 0.12, 0.02, 1.0) # Fondo oro oscuro
+					style.border_width_left = 2
+					style.border_width_top = 2
+					style.border_width_right = 2
+					style.border_width_bottom = 2
+					style.border_color = Color(1.0, 0.85, 0.2, 1.0) # Borde dorado brillante
+					style.shadow_color = Color(1.0, 0.85, 0.2, 0.4) # Brillo neón dorado
+					style.shadow_size = 6
+					icon_rect.texture = load("res://assets/icon_infinity.png")
+				
+				reward.add_theme_stylebox_override("panel", style)
 				reward.add_child(icon_rect)
 				
 				reward.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1314,7 +1550,7 @@ func start_next_generation():
 				
 				var t = create_tween()
 				t.tween_property(reward, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(randf_range(0.0, 0.3))
-				astar.set_point_solid(cell, true) # Evitar que salgan dos recompensas en la misma celda
+				astar.set_point_solid(cell, true)
 				
 	# === SPARK: PROCEDURAL HOURGLASS (RELOJ DE ARENA - 20% DE PROBABILIDAD) ===
 	if randf() < 0.2:
@@ -1334,11 +1570,9 @@ func start_next_generation():
 			if cell_rect.intersects(line_clear_rect):
 				continue
 				
-			# Evitar solapar con obstáculos o con savia verde
 			if astar.is_point_solid(cell):
 				continue
 				
-			# Asegurar accesibilidad física por raíces
 			if astar.get_id_path(child_coord, cell).size() > 0:
 				var hourglass = Panel.new()
 				hourglass.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
@@ -1393,16 +1627,13 @@ func start_next_generation():
 			if in_child_box or in_partner_box:
 				continue
 				
-			# Evitar solapamiento con la línea de descenso y su zona de borrado física
 			var cell_rect = Rect2(Vector2(cell.x * GRID_SIZE, cell.y * GRID_SIZE), Vector2(GRID_SIZE, GRID_SIZE))
 			if cell_rect.intersects(line_clear_rect):
 				continue
 				
-			# Evitar solapar con obstáculos u otros coleccionables
 			if astar.is_point_solid(cell):
 				continue
 				
-			# Asegurar accesibilidad física por raíces
 			if astar.get_id_path(child_coord, cell).size() > 0:
 				var red_heart = Panel.new()
 				red_heart.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
@@ -1443,7 +1674,238 @@ func start_next_generation():
 				
 				astar.set_point_solid(cell, true)
 				break
-	# ==========================================================
+
+func start_next_generation():
+	waiting_for_next = false
+	
+	# Si es la primera unión, activar contrareloj, dar paso al drop de música y limpiar tutorial
+	if not first_union_made:
+		first_union_made = true
+		if _music_player and _music_player.playing:
+			_music_player.seek(16.0) # ¡El bombo Phonk revienta con el drop!
+		
+		# Animar la entrada de la barra de savia y del combo de generación de forma elástica y premium
+		var ui_tween = create_tween().set_parallel(true)
+		if _battery_bar:
+			ui_tween.tween_property(_battery_bar, "scale", Vector2.ONE, 0.8).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			ui_tween.tween_property(_battery_bar, "modulate:a", 1.0, 0.6).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		if _generation_combo:
+			ui_tween.tween_property(_generation_combo, "scale", Vector2.ONE, 0.8).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			ui_tween.tween_property(_generation_combo, "modulate:a", 1.0, 0.6).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		if _green_score_label:
+			ui_tween.tween_property(_green_score_label, "scale", Vector2.ONE, 0.8).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+			ui_tween.tween_property(_green_score_label, "modulate:a", 1.0, 0.6).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		
+		if _fade_top and _fade_bottom:
+			ui_tween.tween_property(_fade_top, "modulate:a", 1.0, 1.0)
+			ui_tween.tween_property(_fade_bottom, "modulate:a", 1.0, 1.0)
+		
+		# Limpiar nodos del tutorial de forma segura
+		if _tutorial_line:
+			_tutorial_line.queue_free()
+			_tutorial_line = null
+		if _tutorial_cursor:
+			_tutorial_cursor.queue_free()
+			_tutorial_cursor = null
+		if _mechanics_tutorial_panel:
+			var t_panel = create_tween()
+			t_panel.set_parallel(true)
+			t_panel.tween_property(_mechanics_tutorial_panel, "modulate:a", 0.0, 0.4).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+			t_panel.tween_property(_mechanics_tutorial_panel, "position:y", _mechanics_tutorial_panel.position.y + 50.0, 0.4).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+			t_panel.chain().tween_callback(_mechanics_tutorial_panel.queue_free)
+			_mechanics_tutorial_panel = null
+		if _sap_tutorial_panel:
+			var t_sap = create_tween()
+			t_sap.set_parallel(true)
+			t_sap.tween_property(_sap_tutorial_panel, "modulate:a", 0.0, 0.4).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+			t_sap.tween_property(_sap_tutorial_panel, "position:y", _sap_tutorial_panel.position.y + 50.0, 0.4).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+			t_sap.chain().tween_callback(_sap_tutorial_panel.queue_free)
+			_sap_tutorial_panel = null
+			
+	# Guardar la ruta actual en el historial de colisiones
+	all_previous_paths.append_array(current_path)
+	for p in current_path:
+		_occupied_previous_points[p] = true
+	
+	# --- CÁLCULO DE branch_point Y child_grid_center AL INICIO ---
+	var current_y = descendant.position.y
+	var mid_x = (ancestor.position.x + descendant.position.x) / 2.0
+	
+	# Encontrar el punto de la ruta más cercano al CENTRO HORIZONTAL entre los padres.
+	var branch_point = current_path[0]
+	var min_dist_to_center = 999999.0
+	var local_max_y = -999999.0
+	
+	for p in current_path:
+		var dist = abs(p.x - mid_x)
+		if dist < min_dist_to_center - 10: # Mejorar si se acerca significativamente al centro
+			min_dist_to_center = dist
+			local_max_y = p.y
+			branch_point = p
+		elif abs(dist - min_dist_to_center) <= 10: # Si está igual de centrado, preferir el más profundo
+			if p.y > local_max_y:
+				local_max_y = p.y
+				branch_point = p
+				
+	# Encontrar la profundidad MÁXIMA ABSOLUTA de toda la ruta para el nuevo hijo
+	var absolute_max_y = current_path[0].y
+	for p in current_path:
+		if p.y > absolute_max_y:
+			absolute_max_y = p.y
+	
+	# Instanciar al Hijo (alineado al centro y por debajo del todo)
+	var child_grid_center = get_grid_pos(Vector2(branch_point.x, absolute_max_y + 6 * GRID_SIZE))
+	# -------------------------------------------------------------
+	
+	# 1. Encontrar el índice del branch_point en el camino
+	var branch_idx = 0
+	var min_dist = 99999.0
+	for idx in range(current_path.size()):
+		var d = current_path[idx].distance_to(branch_point)
+		if d < min_dist:
+			min_dist = d
+			branch_idx = idx
+			
+	# Dividir en dos caminos que nacen en los padres y terminan en el branch_point
+	var path1 = current_path.slice(0, branch_idx + 1)
+	var path2 = current_path.slice(branch_idx, current_path.size())
+	path2.reverse() # Invertir para que crezca desde el descendiente hacia el branch
+	
+	# Crear las dos hélices horizontales
+	var helix1 = create_wrapping_helix(path1)
+	var helix2 = create_wrapping_helix(path2)
+	roots_container.add_child(helix1)
+	roots_container.add_child(helix2)
+	
+	var full_p1 = helix1.points
+	var full_p2 = helix2.points
+	helix1.points = []
+	helix2.points = []
+	
+	# Cambiar color de raíces y retratos antiguos a un tono oscuro gradualmente usando un Tween
+	var tween = create_tween()
+	tween.set_parallel(true)
+	# La línea pasa a un tono amarillo dorado atenuado y semi-transparente
+	tween.tween_property(root_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
+	tween.tween_property(ancestor, "color", ancestor.color.darkened(0.5), 1.0)
+	tween.tween_property(descendant, "color", descendant.color.darkened(0.5), 1.0)
+	
+	# Fase 1: Animar el crecimiento físico simultáneo desde ambos padres al branch_point (1.0s)
+	var h_dur = 1.0
+	if full_p1.size() > 0:
+		tween.tween_method(func(pct: float):
+			var count = int(pct * full_p1.size())
+			helix1.points = full_p1.slice(0, count)
+		, 0.0, 1.0, h_dur).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		
+	if full_p2.size() > 0:
+		tween.tween_method(func(pct: float):
+			var count = int(pct * full_p2.size())
+			helix2.points = full_p2.slice(0, count)
+		, 0.0, 1.0, h_dur).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		
+	# Hacer crecer los pinchitos/espinas físicas en los caminos horizontales al paso de la espiral
+	spawn_growing_thorns(path1, 0.0, h_dur)
+	spawn_growing_thorns(path2, 0.0, h_dur)
+	
+	# Desactivar animaciones (respiración y cabeceo) de los padres que acaban de pasar a la historia
+	ancestor.active = false
+	descendant.active = false
+	
+	var child = PortraitFrame.new()
+	child.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
+	child.position = child_grid_center - Vector2(GRID_SIZE * 1.5, GRID_SIZE * 1.5)
+	
+	# 50/50 de probabilidad de ser hombre o mujer
+	var is_boy = randf() > 0.5
+	if is_boy:
+		child.color = Color(0, 0.8, 1, 1) # Azul
+	else:
+		child.color = Color(1, 0, 0.8, 1) # Rosa
+		
+	child.z_index = 10 # Siempre por encima de las raíces
+	child.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	child.pivot_offset = child.size / 2.0
+	child.scale = Vector2.ZERO
+	add_child(child)
+	tween.tween_property(child, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	
+	var descent_line = Line2D.new()
+	descent_line.width = GRID_SIZE * 0.4
+	descent_line.default_color = Color(1, 0.9, 0, 1) # Nace brillante
+	descent_line.add_point(branch_point)
+	descent_line.add_point(child_grid_center)
+	roots_container.add_child(descent_line)
+	
+	# 2. Enroscar hélice en la línea de bajada también
+	var descent_helix = create_wrapping_helix([branch_point, child_grid_center])
+	roots_container.add_child(descent_helix)
+	
+	var descent_full_points = descent_helix.points
+	descent_helix.points = []
+	
+	tween.tween_property(descent_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
+	
+	# Fase 2: Animar el crecimiento progresivo de la hélice vertical (desde el branch_point hacia el hijo) tras el encuentro (delay 1.0s)
+	var v_dur = 1.0
+	var v_delay = 1.0
+	if descent_full_points.size() > 0:
+		tween.tween_method(func(pct: float):
+			var count = int(pct * descent_full_points.size())
+			descent_helix.points = descent_full_points.slice(0, count)
+		, 0.0, 1.0, v_dur).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT).set_delay(v_delay)
+		
+	# Hacer crecer los pinchitos/espinas físicas en el camino vertical descendente
+	spawn_growing_thorns([branch_point, child_grid_center], v_delay, v_dur)
+	
+	# Añadir la línea vertical al historial de colisiones antiguas y destruir obstáculos en su camino
+	var start_y_grid = int(branch_point.y / GRID_SIZE)
+	var end_y_grid = int(child_grid_center.y / GRID_SIZE)
+	var branch_x_grid = int(branch_point.x / GRID_SIZE)
+	
+	# Hacemos que la línea vertical sea sólida hasta el borde superior del retrato (end_y_grid - 1)
+	# Esto evita que se crucen o solapen raíces antiguas directamente sobre el marco del personaje.
+	for y in range(start_y_grid, end_y_grid - 1):
+		var pos = get_grid_pos(Vector2(branch_x_grid * GRID_SIZE, y * GRID_SIZE))
+		all_previous_paths.append(pos)
+		_occupied_previous_points[pos] = true
+	# Instanciar a la nueva Pareja (ya no en la misma línea estricta)
+	var new_partner = PortraitFrame.new()
+	new_partner.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
+	
+	var offset_cells_x = randi_range(10, 16)
+	var offset_cells_y = randi_range(-2, 4) # La pareja puede estar un poco más arriba o más abajo que el hijo
+	
+	var target_x = 0
+	if child.position.x < 1152 / 2.0:
+		target_x = child.position.x + offset_cells_x * GRID_SIZE
+	else:
+		target_x = child.position.x - offset_cells_x * GRID_SIZE
+	target_x = clamp(target_x, GRID_SIZE * 4, 1152 - GRID_SIZE * 4) # Mayor margen en bordes para el 3x3
+	
+	var partner_grid_center = get_grid_pos(Vector2(target_x, child_grid_center.y + offset_cells_y * GRID_SIZE))
+	new_partner.position = partner_grid_center - Vector2(GRID_SIZE * 1.5, GRID_SIZE * 1.5)
+	
+	if is_boy:
+		new_partner.color = Color(1, 0, 0.8, 1) # Rosa
+	else:
+		new_partner.color = Color(0, 0.8, 1, 1) # Azul
+		
+	new_partner.z_index = 10 # Siempre por encima de las raíces
+	new_partner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	new_partner.pivot_offset = new_partner.size / 2.0
+	new_partner.scale = Vector2.ZERO
+	add_child(new_partner)
+	tween.tween_property(new_partner, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	
+	# --- NUEVA LÓGICA DE LIMPIEZA TOTAL Y GENERACIÓN PROCEDURAL ---
+	# 1. El camino de la línea vertical entera (con margen ancho)
+	var line_clear_rect = Rect2(
+		Vector2(branch_point.x - GRID_SIZE, branch_point.y),
+		Vector2(GRID_SIZE * 2, child_grid_center.y - branch_point.y + GRID_SIZE)
+	)
+	
+	generate_procedural_generation_content(child, new_partner, child_grid_center, partner_grid_center, line_clear_rect)
 	
 	# Limpieza de memoria: borrar obstáculos muy antiguos
 	var limit_y = camera.position.y - 1500
@@ -1463,7 +1925,7 @@ func start_next_generation():
 	# Limpiar líneas de raíces antiguas del contenedor que ya estén muy arriba del límite
 	for line in roots_container.get_children():
 		if line is Line2D and line != root_line and line != descent_line:
-			if line.points.size() > 0 and line.points[0].y < limit_y:
+			if line.points.size() > 0 and line.points[-1].y < limit_y:
 				line.queue_free()
 			
 	# Limpiar historial de rutas antiguas para liberar memoria
@@ -1670,9 +2132,10 @@ func _play_music() -> void:
 
 func _setup_main_menu():
 	# Crear el contenedor del menú posicionado a y = -648
+	# Le damos el doble de ancho (2304px) para contener ambos menús uno al lado del otro
 	_menu_node = Control.new()
 	_menu_node.name = "MainMenu"
-	_menu_node.size = Vector2(1152, 648)
+	_menu_node.size = Vector2(2304, 648)
 	_menu_node.position = Vector2(0, -648)
 	add_child(_menu_node)
 	
@@ -1684,6 +2147,26 @@ func _setup_main_menu():
 	_body_font = SystemFont.new()
 	_body_font.font_names = PackedStringArray(["Trebuchet MS", "Arial", "sans-serif"])
 	_body_font.font_weight = 500 # Regular/medio elegante y limpio
+	
+	_en_flags.clear()
+	_es_flags.clear()
+	
+	# Instanciar el menú en inglés a x = 0
+	var menu_en = _create_menu_half("en", 0.0)
+	_menu_node.add_child(menu_en)
+	
+	# Instanciar el menú en español a x = 1152
+	var menu_es = _create_menu_half("es", 1152.0)
+	_menu_node.add_child(menu_es)
+	
+	# Cargar panel de clasificación oculto
+	_setup_leaderboard_panel()
+
+func _create_menu_half(lang: String, x_offset: float) -> Control:
+	var half = Control.new()
+	half.name = "Menu_" + lang
+	half.size = Vector2(1152, 648)
+	half.position = Vector2(x_offset, 0)
 	
 	# Contenedores para el Título del juego de Alta Costura por caracteres
 	var title_lbl = Control.new()
@@ -1700,74 +2183,85 @@ func _setup_main_menu():
 	title_shadow.clip_contents = false
 	title_shadow.z_index = 1
 	
-	_menu_node.add_child(title_shadow)
-	_menu_node.add_child(title_lbl)
+	half.add_child(title_shadow)
+	half.add_child(title_lbl)
 	
+	# Reconstruir títulos
+	if lang == "en":
+		_rebuild_character_title(title_lbl, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, 48, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
+		_rebuild_character_title(title_shadow, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, 48, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
+	else:
+		_rebuild_character_title(title_lbl, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, 52, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
+		_rebuild_character_title(title_shadow, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, 52, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
+		
 	# Botones: Jugar y Clasificación
 	var play_btn = Button.new()
 	play_btn.name = "PlayButton"
-	_menu_node.add_child(play_btn)
-	_style_menu_button(play_btn, "Jugar")
+	half.add_child(play_btn)
+	_style_menu_button(play_btn, "PLAY" if lang == "en" else "JUGAR")
 	play_btn.position = Vector2((1152 - 280) / 2, 300)
 	play_btn.pressed.connect(_on_play_pressed)
 	
 	var leader_btn = Button.new()
 	leader_btn.name = "LeaderboardButton"
-	_menu_node.add_child(leader_btn)
-	_style_menu_button(leader_btn, "Clasificación")
+	half.add_child(leader_btn)
+	_style_menu_button(leader_btn, "LEADERBOARDS" if lang == "en" else "CLASIFICACIÓN")
 	leader_btn.position = Vector2((1152 - 280) / 2, 390)
 	leader_btn.pressed.connect(_on_leaderboard_pressed)
 	
 	# Contenedor de selección de idioma (Banderas en la esquina superior derecha)
-	_lang_selector = HBoxContainer.new()
-	_lang_selector.name = "LangSelector"
-	_lang_selector.position = Vector2(1152 - 116, 24)
-	_lang_selector.size = Vector2(92, 44)
-	_lang_selector.add_theme_constant_override("separation", 12)
-	_menu_node.add_child(_lang_selector)
+	var lang_selector = HBoxContainer.new()
+	lang_selector.name = "LangSelector"
+	lang_selector.position = Vector2(1152 - 116, 24)
+	lang_selector.size = Vector2(92, 44)
+	lang_selector.add_theme_constant_override("separation", 12)
+	half.add_child(lang_selector)
 	
 	# Botón bandera Inglesa
-	_en_flag_btn = Button.new()
-	_en_flag_btn.name = "FlagEN"
-	_en_flag_btn.icon = load("res://assets/flag_uk.png")
-	_en_flag_btn.expand_icon = true
-	_en_flag_btn.text = ""
-	_style_flag_button(_en_flag_btn)
-	_lang_selector.add_child(_en_flag_btn)
-	_en_flag_btn.pressed.connect(func():
-		_set_language("en")
-		AudioServer.set_bus_mute(0, false)
-		AudioServer.set_bus_volume_db(0, 0.0)
-		var music_bus_idx = AudioServer.get_bus_index("Music")
-		if music_bus_idx != -1:
-			AudioServer.set_bus_mute(music_bus_idx, false)
-			AudioServer.set_bus_volume_db(music_bus_idx, 0.0)
-		if _music_player and not _music_player.playing:
-			_music_player.play()
-	)
+	var en_flag_btn = Button.new()
+	en_flag_btn.name = "FlagEN"
+	en_flag_btn.icon = load("res://assets/flag_uk.png")
+	en_flag_btn.expand_icon = true
+	en_flag_btn.text = ""
+	_style_flag_button(en_flag_btn)
+	lang_selector.add_child(en_flag_btn)
+	_en_flags.append(en_flag_btn)
+	en_flag_btn.pressed.connect(func(): _on_language_flag_pressed("en"))
 	
 	# Botón bandera Española
-	_es_flag_btn = Button.new()
-	_es_flag_btn.name = "FlagES"
-	_es_flag_btn.icon = load("res://assets/flag_es.png")
-	_es_flag_btn.expand_icon = true
-	_es_flag_btn.text = ""
-	_style_flag_button(_es_flag_btn)
-	_lang_selector.add_child(_es_flag_btn)
-	_es_flag_btn.pressed.connect(func():
-		_set_language("es")
-		AudioServer.set_bus_mute(0, false)
-		AudioServer.set_bus_volume_db(0, 0.0)
-		var music_bus_idx = AudioServer.get_bus_index("Music")
-		if music_bus_idx != -1:
-			AudioServer.set_bus_mute(music_bus_idx, false)
-			AudioServer.set_bus_volume_db(music_bus_idx, 0.0)
-		if _music_player and not _music_player.playing:
-			_music_player.play()
-	)
+	var es_flag_btn = Button.new()
+	es_flag_btn.name = "FlagES"
+	es_flag_btn.icon = load("res://assets/flag_es.png")
+	es_flag_btn.expand_icon = true
+	es_flag_btn.text = ""
+	_style_flag_button(es_flag_btn)
+	lang_selector.add_child(es_flag_btn)
+	_es_flags.append(es_flag_btn)
+	es_flag_btn.pressed.connect(func(): _on_language_flag_pressed("es"))
 	
-	# Cargar panel de clasificación oculto
-	_setup_leaderboard_panel()
+	return half
+
+func _on_language_flag_pressed(lang_code: String):
+	if lang_code == current_language:
+		return
+		
+	# Garantizar la activación del bus de audio al presionar
+	AudioServer.set_bus_mute(0, false)
+	AudioServer.set_bus_volume_db(0, 0.0)
+	var music_bus_idx = AudioServer.get_bus_index("Music")
+	if music_bus_idx != -1:
+		AudioServer.set_bus_mute(music_bus_idx, false)
+		AudioServer.set_bus_volume_db(music_bus_idx, 0.0)
+	if _music_player and not _music_player.playing:
+		_music_player.play()
+		
+	# Cambiar el idioma (modulando opacidades e indicando textos globales)
+	_set_language(lang_code)
+	
+	# Transición lateral suave del contenedor de menú en lugar del eje X de la cámara
+	var target_x = 0.0 if lang_code == "en" else -1152.0
+	var t = create_tween()
+	t.tween_property(_menu_node, "position:x", target_x, 1.2).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 
 func _style_menu_button(btn: Button, text_val: String):
 	btn.text = text_val
@@ -1858,26 +2352,31 @@ func _style_flag_button(btn: Button):
 func _set_language(lang_code: String):
 	current_language = lang_code
 	
-	# 1. Resaltar visualmente la bandera seleccionada (opacidad premium)
-	if _en_flag_btn and _es_flag_btn:
-		if current_language == "en":
-			_en_flag_btn.modulate.a = 1.0
-			_es_flag_btn.modulate.a = 0.4
-		else:
-			_en_flag_btn.modulate.a = 0.4
-			_es_flag_btn.modulate.a = 1.0
+	# 1. Resaltar visualmente las banderas seleccionadas (opacidad premium)
+	for flag in _en_flags:
+		if is_instance_valid(flag):
+			flag.modulate.a = 1.0 if current_language == "en" else 0.4
+	for flag in _es_flags:
+		if is_instance_valid(flag):
+			flag.modulate.a = 1.0 if current_language == "es" else 0.4
 			
-	# 2. Actualizar el título principal con su tamaño de fuente y colores optimizados por caracteres
-	if _menu_node:
-		var title_lbl = _menu_node.find_child("MenuTitle", true, false)
-		var title_shadow = _menu_node.find_child("MenuTitleShadow", true, false)
-		if title_lbl and title_shadow:
-			if current_language == "en":
-				_rebuild_character_title(title_lbl, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, 48, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
-				_rebuild_character_title(title_shadow, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, 48, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
-			else:
-				_rebuild_character_title(title_lbl, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, 52, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
-				_rebuild_character_title(title_shadow, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, 52, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
+	# 2. Actualizar textos del área de clasificación (Game Over)
+	if _classification_area:
+		var go_title = _classification_area.find_child("GameOverTitle", true, false)
+		if go_title:
+			go_title.text = "THE LINEAGE HAS WITHERED" if current_language == "en" else "EL LINAJE SE HA MARCHITADO"
+		var name_input = _classification_area.find_child("NameInput", true, false)
+		if name_input:
+			name_input.placeholder_text = "Enter your name (max 12)..." if current_language == "en" else "Escribe tu nombre (máx. 12)..."
+		var submit_btn = _classification_area.find_child("SubmitBtn", true, false)
+		if submit_btn:
+			submit_btn.text = "REGISTER LINEAGE" if current_language == "en" else "REGISTRAR LINAJE"
+		var cancel_btn = _classification_area.find_child("CancelBtn", true, false)
+		if cancel_btn:
+			cancel_btn.text = "RETURN TO MENU" if current_language == "en" else "VOLVER AL MENÚ"
+			
+	# 3. Actualizar los marcadores de la partida activa
+	update_ui()
 
 func _rebuild_character_title(container: Control, text: String, font: Font, font_size: int, font_color: Color, outline_color: Color, outline_size: int):
 	# Limpiar hijos viejos de forma segura
@@ -1924,32 +2423,6 @@ func _rebuild_character_title(container: Control, text: String, font: Font, font
 			char_lbl.resized.connect(func(): char_lbl.pivot_offset = char_lbl.size / 2.0)
 			
 			hbox.add_child(char_lbl)
-				
-		# 3. Actualizar textos de los botones principales del menú
-		var play_btn = _menu_node.find_child("PlayButton", true, false)
-		if play_btn:
-			play_btn.text = "PLAY" if current_language == "en" else "JUGAR"
-		var leader_btn = _menu_node.find_child("LeaderboardButton", true, false)
-		if leader_btn:
-			leader_btn.text = "LEADERBOARDS" if current_language == "en" else "CLASIFICACIÓN"
-			
-	# 4. Actualizar textos del área de clasificación (Game Over)
-	if _classification_area:
-		var go_title = _classification_area.find_child("GameOverTitle", true, false)
-		if go_title:
-			go_title.text = "THE LINEAGE HAS WITHERED" if current_language == "en" else "EL LINAJE SE HA MARCHITADO"
-		var name_input = _classification_area.find_child("NameInput", true, false)
-		if name_input:
-			name_input.placeholder_text = "Enter your name (max 12)..." if current_language == "en" else "Escribe tu nombre (máx. 12)..."
-		var submit_btn = _classification_area.find_child("SubmitBtn", true, false)
-		if submit_btn:
-			submit_btn.text = "REGISTER LINEAGE" if current_language == "en" else "REGISTRAR LINAJE"
-		var cancel_btn = _classification_area.find_child("CancelBtn", true, false)
-		if cancel_btn:
-			cancel_btn.text = "RETURN TO MENU" if current_language == "en" else "VOLVER AL MENÚ"
-			
-	# 5. Actualizar los marcadores de la partida activa
-	update_ui()
 
 func _on_play_pressed():
 	# Garantizar que el audio se reproduce en la web tras la primera interacción (evitando el bloqueo de la Autoplay Policy del navegador)
@@ -2012,17 +2485,17 @@ func _on_play_pressed():
 			"icon_path": "res://assets/icon_mouse.png",
 			"title_en": "1. CONNECT",
 			"title_es": "1. CONECTAR",
-			"desc_en": "L-Click & Drag: Connect.\nR-Click: Hold to retract.",
-			"desc_es": "Click Izq. y Arrastra: Conectar.\nClick Der.: Mantén para borrar.",
+			"desc_en": "L-Click & Drag: Connect\nHold R-Click: Retract",
+			"desc_es": "Click Izq. y Arrastra: Conectar\nMantén Click Der: Retraer",
 			"color": Color(0.3, 0.8, 1.0), # Celeste neón
-			"desc_font_size": 11
+			"desc_font_size": 13
 		},
 		{
 			"icon_path": "res://assets/icon_heart_green.png",
 			"title_en": "2. LIFE HEART",
 			"title_es": "2. VIDA",
-			"desc_en": "+1 Point.",
-			"desc_es": "+1 Punto.",
+			"desc_en": "+1 Point",
+			"desc_es": "+1 Punto",
 			"color": Color(0.2, 0.9, 0.2), # Verde neón
 			"desc_font_size": 18
 		},
@@ -2030,8 +2503,8 @@ func _on_play_pressed():
 			"icon_path": "res://assets/icon_heart_red.png",
 			"title_en": "3. SUPER HEART",
 			"title_es": "3. SÚPER CORAZÓN",
-			"desc_en": "+5 Points.",
-			"desc_es": "+5 Puntos.",
+			"desc_en": "+5 Points",
+			"desc_es": "+5 Puntos",
 			"color": Color(1.0, 0.25, 0.25), # Rojo neón
 			"desc_font_size": 18
 		},
@@ -2039,10 +2512,10 @@ func _on_play_pressed():
 			"icon_path": "res://assets/icon_hourglass.png",
 			"title_en": "4. HOURGLASS",
 			"title_es": "4. TIEMPO",
-			"desc_en": "Slows down camera speed for a few seconds.",
-			"desc_es": "Ralentiza la cámara por unos segundos.",
+			"desc_en": "Slows down for\na few seconds",
+			"desc_es": "Ralentiza por\nunos segundos",
 			"color": Color(0.8, 0.4, 1.0), # Violeta/Púrpura neón
-			"desc_font_size": 11
+			"desc_font_size": 15
 		}
 	]
 	
@@ -2100,13 +2573,22 @@ func _on_play_pressed():
 		
 		var size = data["desc_font_size"]
 		var pos_y = 74 # Bajado de 68 a 74
-		if size >= 18:
-			pos_y = 78 # Bajado de 72 a 78 para textos cortos gigantes
+		if size >= 13:
+			pos_y = 80 # Mayor separación del título para textos medianos y grandes
 			
 		desc_lbl.position = Vector2(10, pos_y)
 		if _body_font:
 			desc_lbl.add_theme_font_override("font", _body_font)
 		desc_lbl.add_theme_font_size_override("font_size", size)
+		
+		# Ajustar el espacio del salto de línea para que las frases estén más juntas
+		if size == 13:
+			desc_lbl.add_theme_constant_override("line_spacing", 1)
+		elif size == 15:
+			desc_lbl.add_theme_constant_override("line_spacing", -3)
+		else:
+			desc_lbl.add_theme_constant_override("line_spacing", 0)
+			
 		desc_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9, 1.0)) # Blanco brillante limpio
 		desc_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
 		desc_lbl.add_theme_constant_override("outline_size", 4) # Contorno limpio y nítido
@@ -2142,15 +2624,15 @@ func _on_play_pressed():
 		{
 			"title_en": "ENERGY",
 			"title_es": "ENERGÍA",
-			"desc_en": "Your life meter. Drawing\npaths drains energy. If\nempty (0), you lose!",
-			"desc_es": "Tu medidor de vida. Dibujar\ncaminos drena tu energía.\n¡Si llega a 0, perderás!",
+			"desc_en": "Your life meter\nDrawing paths drains energy\nIf empty (0), you lose!",
+			"desc_es": "Tu medidor de vida\nDibujar caminos drena tu energía\n¡Si llega a 0, perderás!",
 			"color": Color(1.0, 0.85, 0.15) # Oro
 		},
 		{
 			"title_en": "PATH RETRACTION PENALTY",
 			"title_es": "PENALIZACIÓN AL RETRAER",
-			"desc_en": "Right-Click erases paths but only refunds\n33% of the energy cost (1/3).",
-			"desc_es": "El click derecho borra caminos, pero solo\ndevuelve el 33% de la energía (1/3).",
+			"desc_en": "Right-Click retracts paths but only refunds\n33% of the energy cost (1/3)",
+			"desc_es": "El click derecho retrae caminos, pero solo\ndevuelve el 33% de la energía (1/3)",
 			"color": Color(1.0, 0.4, 0.4) # Rojo peligro
 		}
 	]
@@ -2233,7 +2715,7 @@ func _on_play_pressed():
 	
 	# Iniciar transición suave de la cámara hacia el offset de juego actual
 	var tween = create_tween()
-	tween.tween_property(camera, "position:y", current_game_y_offset, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(camera, "position", Vector2(0.0, current_game_y_offset), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 	tween.tween_callback(func():
 		# Asegurar que se posicionen de forma instantánea en el centro del ancestro antes de mostrarlos para evitar parpadeos
 		var ancestor_center = ancestor.position + ancestor.size / 2.0
@@ -2261,7 +2743,7 @@ func _on_leaderboard_pressed():
 		_leaderboard_back_btn.show()
 	
 	var tween = create_tween()
-	tween.tween_property(camera, "position:y", menu_y + 648.0, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(camera, "position", Vector2(0.0, menu_y + 648.0), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 
 func _setup_leaderboard_panel():
 	_leaderboard_panel = PanelContainer.new()
@@ -2338,7 +2820,7 @@ func _setup_leaderboard_panel():
 	_leaderboard_back_btn.pressed.connect(func():
 		var menu_y = _menu_node.position.y
 		var tween_press = create_tween()
-		tween_press.tween_property(camera, "position:y", menu_y, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+		tween_press.tween_property(camera, "position", Vector2(0.0, menu_y), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 		tween_press.tween_callback(func():
 			_leaderboard_panel.hide()
 			_leaderboard_back_btn.hide()
@@ -2493,6 +2975,33 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		list_vbox.add_child(hbox)
 		
+		# Determinar colores según posición (Oro, Plata, Bronce, Muted) y remover resaltado cian
+		var pos_color: Color
+		var name_color: Color
+		var date_color: Color
+		var score_color: Color
+		
+		if i == 0: # Oro (Dorado más rico y cálido, ámbar/oro pesado)
+			pos_color = Color(1.0, 0.74, 0.0, 1.0)
+			name_color = Color(1.0, 0.9, 0.6, 1.0)
+			date_color = Color(0.85, 0.75, 0.55, 0.8)
+			score_color = Color(1.0, 0.74, 0.0, 1.0)
+		elif i == 1: # Plata (Metálico muy brillante, contraste con el gris)
+			pos_color = Color(0.88, 0.94, 0.98, 1.0)
+			name_color = Color(0.94, 0.96, 1.0, 1.0)
+			date_color = Color(0.72, 0.76, 0.8, 0.8)
+			score_color = Color(0.88, 0.94, 0.98, 1.0)
+		elif i == 2: # Bronce (Cobre cálido y distintivo)
+			pos_color = Color(0.88, 0.45, 0.18, 1.0)
+			name_color = Color(0.92, 0.65, 0.45, 1.0)
+			date_color = Color(0.78, 0.62, 0.52, 0.8)
+			score_color = Color(0.88, 0.45, 0.18, 1.0)
+		else: # Resto (Gris neutral, pero con fecha e info perfectamente legibles)
+			pos_color = Color(0.4, 0.4, 0.4, 1.0)
+			name_color = Color(0.55, 0.55, 0.55, 1.0)
+			date_color = Color(0.55, 0.55, 0.55, 0.7) # Claramente visible pero secundario
+			score_color = Color(0.5, 0.5, 0.5, 1.0)
+
 		# 1. Columna de Posición: Ancho fijo de 40px
 		var pos_lbl = Label.new()
 		pos_lbl.text = str(i + 1) + ". "
@@ -2500,10 +3009,9 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		if _body_font:
 			pos_lbl.add_theme_font_override("font", _body_font)
 		pos_lbl.add_theme_font_size_override("font_size", 20)
-		pos_lbl.add_theme_color_override("font_color", Color(0.8, 0.65, 0.1, 1) if i < 3 else Color(0.6, 0.6, 0.6, 1))
+		pos_lbl.add_theme_color_override("font_color", pos_color)
 		hbox.add_child(pos_lbl)
 
-		
 		# 2. Columna de Nombre: Ancho mínimo de 176px con expansión fill y recorte de texto largo
 		var name_lbl = Label.new()
 		name_lbl.text = item["name"]
@@ -2513,10 +3021,7 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		if _body_font:
 			name_lbl.add_theme_font_override("font", _body_font)
 		name_lbl.add_theme_font_size_override("font_size", 20)
-		if item["name"] == "Tu Récord" or item["name"] == "Your Record":
-			name_lbl.add_theme_color_override("font_color", Color(0.2, 0.8, 1, 1))
-		else:
-			name_lbl.add_theme_color_override("font_color", Color(0.9, 0.85, 0.7, 1) if i < 3 else Color(0.9, 0.9, 0.9, 1))
+		name_lbl.add_theme_color_override("font_color", name_color)
 		hbox.add_child(name_lbl)
 		
 		# 3. Columna de Fecha: Ancho fijo de 140px, centrado horizontalmente
@@ -2527,7 +3032,7 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		if _body_font:
 			date_lbl.add_theme_font_override("font", _body_font)
 		date_lbl.add_theme_font_size_override("font_size", 16)
-		date_lbl.add_theme_color_override("font_color", Color(0.8, 0.7, 0.5, 0.8)) # Pergamino dorado medieval cálido
+		date_lbl.add_theme_color_override("font_color", date_color)
 		hbox.add_child(date_lbl)
 		
 		# 4. Columna de Puntuación (Generación): Ancho de 100px, alineado a la derecha
@@ -2538,10 +3043,7 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 		if _body_font:
 			score_lbl.add_theme_font_override("font", _body_font)
 		score_lbl.add_theme_font_size_override("font_size", 20)
-		if item["name"] == "Tu Récord" or item["name"] == "Your Record":
-			score_lbl.add_theme_color_override("font_color", Color(0.2, 0.8, 1, 1))
-		else:
-			score_lbl.add_theme_color_override("font_color", Color(0.95, 0.8, 0.2, 1) if i < 3 else Color(0.8, 0.7, 0.5, 1))
+		score_lbl.add_theme_color_override("font_color", score_color)
 		hbox.add_child(score_lbl)
 		
 	# VBox para los dos botones de navegación de la lista (Subir y Bajar la lista)
@@ -3084,6 +3586,30 @@ func _setup_classification_area():
 	
 	cancel_btn.pressed.connect(_on_back_to_menu_pressed)
 	
+	# Estatua Hombre (Izquierda) - Dimensiones recortadas 424x1136, escalada a alto 500
+	var statue_left = TextureRect.new()
+	statue_left.name = "StatueLeft"
+	statue_left.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	statue_left.stretch_mode = TextureRect.STRETCH_SCALE
+	statue_left.clip_contents = true
+	statue_left.texture = load("res://assets/estatuaHombre.png")
+	statue_left.custom_minimum_size = Vector2(187, 500)
+	statue_left.size = Vector2(187, 500)
+	statue_left.position = Vector2(40, (648 - 500) / 2.0)
+	_classification_area.add_child(statue_left)
+	
+	# Estatua Mujer (Derecha) - Dimensiones recortadas 430x1176, escalada a alto 500
+	var statue_right = TextureRect.new()
+	statue_right.name = "StatueRight"
+	statue_right.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	statue_right.stretch_mode = TextureRect.STRETCH_SCALE
+	statue_right.clip_contents = true
+	statue_right.texture = load("res://assets/estatuaMujer.png")
+	statue_right.custom_minimum_size = Vector2(183, 500)
+	statue_right.size = Vector2(183, 500)
+	statue_right.position = Vector2(1152 - 183 - 40, (648 - 500) / 2.0)
+	_classification_area.add_child(statue_right)
+
 	_classification_area.hide()
 	add_child(_classification_area)
 
@@ -3104,8 +3630,9 @@ func _on_submit_pressed():
 	# Calcular la nueva posición Y del menú principal (un alto de pantalla debajo de la cámara actual)
 	var new_menu_y = camera.position.y + 648.0
 	
-	# Reposicionar el Menú Principal
-	_menu_node.position = Vector2(0, new_menu_y)
+	# Reposicionar el Menú Principal según el idioma seleccionado
+	var target_menu_x = 0.0 if current_language == "en" else -1152.0
+	_menu_node.position = Vector2(target_menu_x, new_menu_y)
 	
 	# Resetear el estado del juego en-situ (limpieza, reseteo de offset y reposicionamiento de padres)
 	_reset_game_state_to_menu(new_menu_y)
@@ -3113,7 +3640,7 @@ func _on_submit_pressed():
 	# Transición premium: la cámara desciende al nuevo menú principal mientras el área de clasificación se desvanece
 	var t = create_tween()
 	t.set_parallel(true)
-	t.tween_property(camera, "position:y", new_menu_y, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	t.tween_property(camera, "position", Vector2(0.0, new_menu_y), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 	t.tween_property(_classification_area, "modulate:a", 0.0, 1.0).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	t.set_parallel(false)
 	t.tween_callback(func():
@@ -3133,19 +3660,20 @@ func _on_back_to_menu_pressed():
 	# Calcular la nueva posición Y del menú principal (un alto de pantalla debajo de la cámara actual)
 	var new_menu_y = camera.position.y + 648.0
 	
-	# Reposicionar el Menú Principal
-	_menu_node.position = Vector2(0, new_menu_y)
+	# Reposicionar el Menú Principal según el idioma seleccionado
+	var target_menu_x_back = 0.0 if current_language == "en" else -1152.0
+	_menu_node.position = Vector2(target_menu_x_back, new_menu_y)
 	
 	# Resetear el estado del juego en-situ (limpieza, reseteo de offset y reposicionamiento de padres)
 	_reset_game_state_to_menu(new_menu_y)
 	
 	# Transición premium: la cámara desciende al nuevo menú principal mientras el área de clasificación se desvanece
-	var t = create_tween()
-	t.set_parallel(true)
-	t.tween_property(camera, "position:y", new_menu_y, 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
-	t.tween_property(_classification_area, "modulate:a", 0.0, 1.0).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	t.set_parallel(false)
-	t.tween_callback(func():
+	var t_back = create_tween()
+	t_back.set_parallel(true)
+	t_back.tween_property(camera, "position", Vector2(0.0, new_menu_y), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	t_back.tween_property(_classification_area, "modulate:a", 0.0, 1.0).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	t_back.set_parallel(false)
+	t_back.tween_callback(func():
 		_classification_area.hide()
 		# Reestablecer el botón y campo de texto para la siguiente partida
 		if cancel_btn:
@@ -3168,6 +3696,12 @@ func _reset_game_state_to_menu(new_menu_y: float):
 	waiting_for_next = false
 	camera_speed = 15.0
 	target_camera_speed = 15.0
+	
+	if _fade_top and _fade_bottom:
+		var fade_tween = create_tween()
+		fade_tween.set_parallel(true)
+		fade_tween.tween_property(_fade_top, "modulate:a", 0.0, 0.5)
+		fade_tween.tween_property(_fade_bottom, "modulate:a", 0.0, 0.5)
 	
 	# Resetear el estado de la ralentización
 	hourglass_time_left = 0.0
@@ -3385,3 +3919,152 @@ func _make_http_request(url: String, method: HTTPClient.Method, headers: PackedS
 	if err != OK:
 		callback.call(1, 0, PackedByteArray()) # Result error
 		http_node.queue_free()
+
+func _setup_fade_overlays():
+	_fade_layer = CanvasLayer.new()
+	_fade_layer.name = "FadeLayer"
+	_fade_layer.layer = 5
+	add_child(_fade_layer)
+	
+	# Asegurar que el HUD se dibuje por encima del difuminado
+	$UI.layer = 10
+	
+	# Difuminado superior
+	_fade_top = TextureRect.new()
+	_fade_top.name = "FadeTop"
+	_fade_top.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_fade_top.size = Vector2(1152, 96) # 96px de alto
+	_fade_top.position = Vector2(0, 0)
+	_fade_top.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fade_layer.add_child(_fade_top)
+	
+	var gradient_top = Gradient.new()
+	gradient_top.colors = [Color(0.027451, 0.0235294, 0.0392157, 1.0), Color(0.027451, 0.0235294, 0.0392157, 0.0)]
+	gradient_top.offsets = [0.0, 1.0]
+	
+	var tex_top = GradientTexture2D.new()
+	tex_top.gradient = gradient_top
+	tex_top.width = 1152
+	tex_top.height = 96
+	tex_top.fill = GradientTexture2D.FILL_LINEAR
+	tex_top.fill_from = Vector2(0.5, 0.0)
+	tex_top.fill_to = Vector2(0.5, 1.0)
+	_fade_top.texture = tex_top
+	
+	# Difuminado inferior
+	_fade_bottom = TextureRect.new()
+	_fade_bottom.name = "FadeBottom"
+	_fade_bottom.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_fade_bottom.size = Vector2(1152, 96) # 96px de alto
+	_fade_bottom.position = Vector2(0, 648 - 96)
+	_fade_bottom.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fade_layer.add_child(_fade_bottom)
+	
+	var gradient_bottom = Gradient.new()
+	gradient_bottom.colors = [Color(0.027451, 0.0235294, 0.0392157, 0.0), Color(0.027451, 0.0235294, 0.0392157, 1.0)]
+	gradient_bottom.offsets = [0.0, 1.0]
+	
+	var tex_bottom = GradientTexture2D.new()
+	tex_bottom.gradient = gradient_bottom
+	tex_bottom.width = 1152
+	tex_bottom.height = 96
+	tex_bottom.fill = GradientTexture2D.FILL_LINEAR
+	tex_bottom.fill_from = Vector2(0.5, 0.0)
+	tex_bottom.fill_to = Vector2(0.5, 1.0)
+	_fade_bottom.texture = tex_bottom
+	
+	# Ocultar inicialmente en el menú
+	_fade_top.modulate.a = 0.0
+	_fade_bottom.modulate.a = 0.0
+
+func _collect_reward_programmatically(reward):
+	if reward.is_queued_for_deletion() or reward.has_meta("dying"):
+		return
+	reward.set_meta("dying", true)
+	
+	var rtype = reward.get_meta("type") if reward.has_meta("type") else "heart"
+	if rtype == "red_heart":
+		sap += 5
+		green_squares_collected += 5
+		
+		var flying_lbl = HBoxContainer.new()
+		flying_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
+		flying_lbl.position = reward.global_position - camera.position - Vector2(32, 12)
+		flying_lbl.size = Vector2(80, 28)
+		flying_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		
+		var text_node = Label.new()
+		text_node.text = "+5 "
+		text_node.add_theme_font_size_override("font_size", 20)
+		text_node.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3, 1.0))
+		text_node.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+		text_node.add_theme_constant_override("outline_size", 6)
+		flying_lbl.add_child(text_node)
+		
+		var icon_tex = TextureRect.new()
+		icon_tex.texture = load("res://assets/icon_heart_red.png")
+		icon_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_tex.custom_minimum_size = Vector2(20, 20)
+		flying_lbl.add_child(icon_tex)
+		
+		$UI.add_child(flying_lbl)
+		
+		var target_pos = _green_score_label.position + Vector2(130, 12) if _green_score_label else Vector2.ZERO
+		var t_fly = create_tween().set_parallel(true)
+		t_fly.tween_property(flying_lbl, "position", target_pos, 0.8).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		t_fly.tween_property(flying_lbl, "scale", Vector2(0.6, 0.6), 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		t_fly.chain().tween_callback(func():
+			flying_lbl.queue_free()
+			displayed_green_score += 5
+			if _green_score_label:
+				_green_score_label.text = str(displayed_green_score)
+				_green_score_label.scale = Vector2(1.5, 1.5)
+				_green_score_label.modulate = Color(2.2, 1.2, 1.2, 1.0)
+				var t_pulse = create_tween().set_parallel(true)
+				t_pulse.tween_property(_green_score_label, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				t_pulse.tween_property(_green_score_label, "modulate", Color.WHITE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		)
+	else: # Green Heart / default
+		sap += 1
+		green_squares_collected += 1
+		
+		var flying_lbl = HBoxContainer.new()
+		flying_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
+		flying_lbl.position = reward.global_position - camera.position - Vector2(32, 12)
+		flying_lbl.size = Vector2(64, 24)
+		flying_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		
+		var text_node = Label.new()
+		text_node.text = "+1 "
+		text_node.add_theme_font_size_override("font_size", 18)
+		text_node.add_theme_color_override("font_color", Color(0.1, 0.9, 0.1, 1.0))
+		text_node.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+		text_node.add_theme_constant_override("outline_size", 6)
+		flying_lbl.add_child(text_node)
+		
+		var icon_tex = TextureRect.new()
+		icon_tex.texture = load("res://assets/icon_heart_green.png")
+		icon_tex.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon_tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon_tex.custom_minimum_size = Vector2(18, 18)
+		flying_lbl.add_child(icon_tex)
+		
+		$UI.add_child(flying_lbl)
+		
+		var target_pos = _green_score_label.position + Vector2(130, 12) if _green_score_label else Vector2.ZERO
+		var t_fly = create_tween().set_parallel(true)
+		t_fly.tween_property(flying_lbl, "position", target_pos, 0.8).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		t_fly.tween_property(flying_lbl, "scale", Vector2(0.6, 0.6), 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		t_fly.chain().tween_callback(func():
+			flying_lbl.queue_free()
+			displayed_green_score += 1
+			if _green_score_label:
+				_green_score_label.text = str(displayed_green_score)
+				_green_score_label.scale = Vector2(1.2, 1.2)
+				_green_score_label.modulate = Color(1.2, 2.2, 1.2, 1.0)
+				var t_pulse = create_tween().set_parallel(true)
+				t_pulse.tween_property(_green_score_label, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				t_pulse.tween_property(_green_score_label, "modulate", Color.WHITE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		)
+	reward.queue_free()

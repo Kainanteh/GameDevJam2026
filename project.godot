@@ -13,7 +13,15 @@ config_version=5
 config/name="GameDevJam2026"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
+boot_splash/bg_color=Color(0.027451, 0.0235294, 0.0392157, 1)
+boot_splash/stretch_mode=0
+boot_splash/use_filter=false
+boot_splash/image="uid://cwheul1lrfiqo"
 config/icon="res://icon.svg"
+
+[audio]
+
+general/default_playback_type.web=0
 
 [physics]
 
@@ -22,7 +30,4 @@ config/icon="res://icon.svg"
 [rendering]
 
 rendering_device/driver.windows="d3d12"
-
-[audio]
-
-general/default_playback_type.web=0
+environment/defaults/default_clear_color=Color(0.027451, 0.0235294, 0.0392157, 1)
