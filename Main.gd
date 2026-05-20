@@ -94,6 +94,10 @@ var auto_descent_points: Array[Vector2] = []
 var auto_descent_index: int = 0
 var auto_descent_tip_pos: Vector2 = Vector2.ZERO
 var pre_powerup_camera_speed: float = 15.0
+var pre_powerup_music_pitch: float = 1.0
+const INFINITY_MUSIC_PITCH: float = 1.32
+var _infinity_music_pitch_tween: Tween = null
+var _infinity_tip_glow: Node2D = null
 
 # Variables para los difuminados (vignette/fade) superior e inferior
 var _fade_layer: CanvasLayer = null
@@ -165,6 +169,7 @@ func _ready():
 	_music_player = AudioStreamPlayer.new()
 	_music_player.name = "BackgroundMusic"
 	_music_player.bus = "Master"
+	_music_player.pitch_scale = 1.0
 	if "playback_type" in _music_player:
 		_music_player.set("playback_type", 0) # Forzar reproducción tipo Stream (0) en Godot 4.3+
 	add_child(_music_player)
@@ -267,21 +272,16 @@ func _process(delta):
 		# Mantener savia a tope
 		sap = MAX_SAP
 		
+		# Actualizar posición del destello en la punta (tanto en delay como en descenso)
+		if is_instance_valid(_infinity_tip_glow):
+			_infinity_tip_glow.position = _get_infinity_tip_visual_pos()
+		
 		# Si hay un delay inicial de transición suave
 		if infinity_start_delay > 0.0:
 			infinity_start_delay -= delta
 			camera.position.y = lerp(camera.position.y, auto_descent_tip_pos.y - 324.0, 0.1)
 			
-			# Atracción magnética y recolección durante la transición
-			for reward in rewards_container.get_children():
-				if reward.is_queued_for_deletion() or reward.has_meta("dying"):
-					continue
-				var reward_center = reward.position + reward.size / 2.0
-				var r_dist = auto_descent_tip_pos.distance_to(reward_center)
-				if r_dist < 450:
-					reward.position = reward.position.lerp(auto_descent_tip_pos, 1.0 - exp(-15.0 * delta))
-				if r_dist < 48:
-					_collect_reward_programmatically(reward)
+			# Durante la fase de carga no recoger nada (el jugador sigue en el mismo sitio)
 			return
 		
 		# Seguir la punta de la raíz de manera suave y fluida
@@ -293,7 +293,7 @@ func _process(delta):
 			var to_target = target_pt - auto_descent_tip_pos
 			var dist = to_target.length()
 			
-			var speed = 900.0 # Píxeles por segundo para un descenso rápido pero visible y suave
+			var speed = 1400.0 # Píxeles por segundo
 			var step = speed * delta
 			if step >= dist:
 				# Llegar al punto de la cuadrícula
@@ -322,23 +322,39 @@ func _process(delta):
 					display_points.append(auto_descent_tip_pos)
 			root_line.points = display_points
 			
-			# Atraer/recolectar recompensas basadas en la posición fluida de la punta
+			# Imán hacia la punta; al estar cerca se consumen y vuelan a la UI (no se pegan al hilo)
+			var tip_pos = _get_infinity_tip_visual_pos()
+			const magnet_collect_dist := GRID_SIZE * 2.5
 			for reward in rewards_container.get_children():
+				if not reward is Control:
+					continue
 				if reward.is_queued_for_deletion() or reward.has_meta("dying"):
 					continue
+				if reward.has_meta("type") and reward.get_meta("type") == "hourglass":
+					continue
 				var reward_center = reward.position + reward.size / 2.0
-				var r_dist = auto_descent_tip_pos.distance_to(reward_center)
-				if r_dist < 450:
-					# Atracción magnética
-					reward.position = reward.position.lerp(auto_descent_tip_pos, 1.0 - exp(-15.0 * delta))
-				if r_dist < 48:
-					_collect_reward_programmatically(reward)
+				var dx = abs(tip_pos.x - reward_center.x)
+				var dy = reward_center.y - tip_pos.y
+				if dx < 620 and dy > -180 and dy < 80:
+					var r_dist = tip_pos.distance_to(reward_center)
+					if r_dist < magnet_collect_dist:
+						_collect_reward_programmatically(reward)
+						continue
+					reward.position = reward.position.lerp(tip_pos - reward.size / 2.0, 1.0 - exp(-18.0 * delta))
 		else:
 			# Fin del trayecto del Power-up de Infinito
 			infinity_powerup_active = false
+			_restore_music_pitch_after_infinity()
+			
+			# Apagar destello de la punta
+			if is_instance_valid(_infinity_tip_glow):
+				var t_glow_out = create_tween()
+				t_glow_out.tween_property(_infinity_tip_glow, "modulate:a", 0.0, 0.3)
+				t_glow_out.tween_callback(_infinity_tip_glow.queue_free)
+				_infinity_tip_glow = null
 			
 			var final_pt = auto_descent_points[-1]
-			
+			_spawn_infinity_portrait_particles(final_pt)
 
 			# Desvanecer la línea de dibujo del descenso (root_line) de brillante dorado a dorado apagado (mismo apagado que el normal)
 			var old_descent_line = root_line
@@ -559,6 +575,8 @@ func _process(delta):
 				if obs.scale.distance_to(Vector2.ONE) < 0.005:
 					obs.scale = Vector2.ONE
 		for rew in rewards_container.get_children():
+			if not rew is Control:
+				continue
 			if rew.scale != Vector2.ONE:
 				rew.scale = rew.scale.lerp(Vector2.ONE, 1.0 - exp(-15.0 * delta))
 				if rew.scale.distance_to(Vector2.ONE) < 0.005:
@@ -648,7 +666,8 @@ func _process(delta):
 	else:
 		# Fallback por reloj de alta precisión si la música no está sonando
 		var global_time = Time.get_ticks_msec() / 1000.0
-		var beat_interval = 60.0 / music_bpm
+		var tempo_pitch := _music_player.pitch_scale if _music_player else 1.0
+		var beat_interval = 60.0 / (music_bpm * tempo_pitch)
 		var current_beat = int(global_time / beat_interval)
 		
 		if current_beat != last_beat_index:
@@ -736,6 +755,9 @@ func _trigger_real_beat() -> void:
 		
 	# 4. Latir las celdas/barras internas de la batería en perfecta sincronía
 	_battery_beat_pulse = 1.0
+	
+	# 5. Chispas doradas en recolectables ∞ al compás
+	_pulse_infinity_collectibles_on_beat()
 
 func trigger_global_beat_pulse() -> void:
 	# 1. Pulsar obstáculos grises (ColorRects en obstacles)
@@ -747,10 +769,64 @@ func trigger_global_beat_pulse() -> void:
 		
 	# 2. Pulsar recompensas verdes (ColorRects en rewards_container)
 	for rew in rewards_container.get_children():
+		if not rew is Control:
+			continue
 		if rew.is_queued_for_deletion() or rew.has_meta("dying"):
 			continue
 		rew.pivot_offset = rew.size / 2.0
 		rew.scale = Vector2(1.28, 1.28) # Exagerado: Crece un 28% (súper jugoso)
+		if rew.has_meta("type") and rew.get_meta("type") == "infinity":
+			rew.modulate = Color(1.45, 1.25, 0.55, 1.0)
+			var t_gold = create_tween()
+			t_gold.tween_property(rew, "modulate", Color.WHITE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+func _pulse_infinity_collectibles_on_beat() -> void:
+	if in_menu or game_over or infinity_powerup_active:
+		return
+	for rew in rewards_container.get_children():
+		if not rew is Control:
+			continue
+		if rew.is_queued_for_deletion() or rew.has_meta("dying"):
+			continue
+		if not rew.has_meta("type") or rew.get_meta("type") != "infinity":
+			continue
+		if rew.scale.x < 0.5:
+			continue
+		var center: Vector2 = rew.position + rew.size / 2.0
+		_spawn_infinity_collectible_beat_particles(center)
+
+func _spawn_infinity_collectible_beat_particles(center: Vector2) -> void:
+	var count := randi_range(4, 7)
+	for _i in range(count):
+		var angle := randf() * TAU
+		var dist := randf_range(14.0, 32.0)
+		var dot_r := randf_range(1.5, 3.5)
+
+		var dot := Line2D.new()
+		dot.width = randf_range(1.5, 2.5)
+		dot.default_color = Color(1.0, randf_range(0.82, 1.0), randf_range(0.0, 0.2), 1.0)
+		dot.joint_mode = Line2D.LINE_JOINT_ROUND
+		dot.begin_cap_mode = Line2D.LINE_CAP_ROUND
+		dot.end_cap_mode = Line2D.LINE_CAP_ROUND
+		dot.z_index = 12
+		var dot_pts: Array[Vector2] = []
+		for j in range(7):
+			var a = TAU * float(j) / 6.0
+			dot_pts.append(Vector2(cos(a), sin(a)) * dot_r)
+		dot.points = dot_pts
+		dot.position = center
+		dot.set_meta("beat_sparkle", true)
+		add_child(dot)
+
+		var outward: Vector2 = center + Vector2(cos(angle), sin(angle)) * dist
+		var t = create_tween().set_parallel(true)
+		t.tween_property(dot, "position", outward, 0.32) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		t.tween_property(dot, "scale", Vector2(0.35, 0.35), 0.32) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		t.tween_property(dot, "modulate:a", 0.0, 0.22) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN).set_delay(0.1)
+		t.chain().tween_callback(dot.queue_free)
 
 func retract_root():
 	if game_over or waiting_for_next:
@@ -851,6 +927,205 @@ func fill_path_to(target_grid_pos: Vector2):
 			break # Detener si chocamos o nos quedamos sin savia
 		step += 1
 
+func _set_music_pitch(target: float, duration: float = 0.0) -> void:
+	if not _music_player:
+		return
+	if is_instance_valid(_infinity_music_pitch_tween):
+		_infinity_music_pitch_tween.kill()
+		_infinity_music_pitch_tween = null
+	if duration <= 0.0:
+		_music_player.pitch_scale = target
+		return
+	_infinity_music_pitch_tween = create_tween()
+	_infinity_music_pitch_tween.tween_property(_music_player, "pitch_scale", target, duration) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+func _boost_music_pitch_for_infinity() -> void:
+	if _music_player:
+		pre_powerup_music_pitch = _music_player.pitch_scale
+	_set_music_pitch(INFINITY_MUSIC_PITCH, 0.85)
+
+func _restore_music_pitch_after_infinity() -> void:
+	_set_music_pitch(pre_powerup_music_pitch, 1.0)
+
+func _get_infinity_tip_visual_pos() -> Vector2:
+	# Punta del hilo + un poco hacia delante para tapar la sombra del cap redondo
+	var tip := auto_descent_tip_pos
+	if is_instance_valid(root_line) and root_line.points.size() > 0:
+		tip = root_line.points[root_line.points.size() - 1]
+	var tip_dir := Vector2.DOWN
+	if is_instance_valid(root_line) and root_line.points.size() >= 2:
+		var pts: PackedVector2Array = root_line.points
+		var diff: Vector2 = pts[pts.size() - 1] - pts[pts.size() - 2]
+		if diff.length_squared() > 0.001:
+			tip_dir = diff.normalized()
+	elif auto_descent_index < auto_descent_points.size():
+		var diff: Vector2 = auto_descent_points[auto_descent_index] - auto_descent_tip_pos
+		if diff.length_squared() > 0.001:
+			tip_dir = diff.normalized()
+	var cover_offset := GRID_SIZE * 0.42
+	if is_instance_valid(root_line):
+		cover_offset = root_line.width * 0.95
+	return tip + tip_dir * cover_offset
+
+func _spawn_infinity_charge_particles(center: Vector2) -> void:
+	# === ANILLO QUE SE CONTRAE ===
+	var ring = Line2D.new()
+	ring.z_index = 24
+	ring.width = 4.0
+	ring.default_color = Color(1.0, 0.88, 0.0, 0.9)
+	ring.joint_mode = Line2D.LINE_JOINT_ROUND
+	ring.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	ring.end_cap_mode = Line2D.LINE_CAP_ROUND
+	add_child(ring)
+	var ring_r_start = 100.0
+	var t_ring = create_tween().set_parallel(true)
+	t_ring.tween_method(func(r: float):
+		if is_instance_valid(ring):
+			var pts: Array[Vector2] = []
+			for j in range(33):
+				var a = TAU * float(j) / 32.0
+				pts.append(center + Vector2(cos(a), sin(a)) * r)
+			ring.points = pts
+	, ring_r_start, 0.0, 1.0).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	t_ring.tween_property(ring, "modulate:a", 0.0, 0.8).set_delay(0.2)
+	t_ring.chain().tween_callback(ring.queue_free)
+
+	# === PUNTOS CIRCULARES QUE CONVERGEN ===
+	var num_dots = 12
+	for i in range(num_dots):
+		var angle = TAU * float(i) / float(num_dots) + randf_range(-0.15, 0.15)
+		var dist = randf_range(60.0, 110.0)
+		var dot_r = randf_range(4.0, 7.0)
+
+		# Cada punto es un pequeño círculo de Line2D → se ve redondo
+		var dot = Line2D.new()
+		dot.width = randf_range(2.5, 4.0)
+		dot.default_color = Color(1.0, randf_range(0.7, 1.0), 0.0, 1.0)
+		dot.joint_mode = Line2D.LINE_JOINT_ROUND
+		dot.begin_cap_mode = Line2D.LINE_CAP_ROUND
+		dot.end_cap_mode = Line2D.LINE_CAP_ROUND
+		dot.z_index = 25
+		var dot_pts: Array[Vector2] = []
+		for j in range(9):
+			var a = TAU * float(j) / 8.0
+			dot_pts.append(Vector2(cos(a), sin(a)) * dot_r)
+		dot.points = dot_pts
+		dot.position = center + Vector2(cos(angle), sin(angle)) * dist
+		add_child(dot)
+
+		var delay = float(i) / float(num_dots) * 0.22
+		var t = create_tween().set_parallel(true)
+		# Mover hacia el centro
+		t.tween_property(dot, "position", center, 1.0 - delay) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN).set_delay(delay)
+		# Desvanecer al llegar
+		t.tween_property(dot, "modulate:a", 0.0, 0.3) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN).set_delay(0.72)
+		t.chain().tween_callback(dot.queue_free)
+
+	# === ONDA DE ENERGÍA EXPANSIVA AL ARRANCAR (a los 0.95s) ===
+	# Anillo que parte de radio 0 y se expande hasta ~160px desvaneciéndose
+	var burst = Line2D.new()
+	burst.z_index = 26
+	burst.width = 6.0
+	burst.default_color = Color(1.0, 0.95, 0.2, 0.0)
+	burst.joint_mode = Line2D.LINE_JOINT_ROUND
+	burst.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	burst.end_cap_mode = Line2D.LINE_CAP_ROUND
+	add_child(burst)
+	var t_burst = create_tween().set_parallel(true)
+	# Primero aparece (flash rápido a los 0.95s)
+	t_burst.tween_property(burst, "modulate:a", 1.0, 0.05).set_delay(0.95)
+	# Luego se expande de r=0 a r=160 y se desvanece durante 0.35s
+	t_burst.tween_method(func(r: float):
+		if is_instance_valid(burst):
+			var alpha = 1.0 - (r / 160.0)
+			burst.default_color = Color(1.0, 0.95, 0.2, alpha)
+			var pts: Array[Vector2] = []
+			for j in range(33):
+				var a = TAU * float(j) / 32.0
+				pts.append(center + Vector2(cos(a), sin(a)) * r)
+			burst.points = pts
+	, 0.0, 160.0, 0.35).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT).set_delay(0.95)
+	t_burst.chain().tween_callback(burst.queue_free)
+
+
+func _spawn_infinity_portrait_particles(center: Vector2) -> void:
+	# Partículas doradas que salen del retrato al completar el descenso (∞)
+	var ring = Line2D.new()
+	ring.z_index = 24
+	ring.width = 4.0
+	ring.default_color = Color(1.0, 0.88, 0.0, 0.95)
+	ring.joint_mode = Line2D.LINE_JOINT_ROUND
+	ring.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	ring.end_cap_mode = Line2D.LINE_CAP_ROUND
+	add_child(ring)
+	var t_ring = create_tween().set_parallel(true)
+	t_ring.tween_method(func(r: float):
+		if is_instance_valid(ring):
+			var pts: Array[Vector2] = []
+			for j in range(33):
+				var a = TAU * float(j) / 32.0
+				pts.append(center + Vector2(cos(a), sin(a)) * r)
+			ring.points = pts
+	, 8.0, 150.0, 0.7).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	t_ring.tween_property(ring, "modulate:a", 0.0, 0.5).set_delay(0.35)
+	t_ring.chain().tween_callback(ring.queue_free)
+
+	var num_dots = 18
+	for i in range(num_dots):
+		var angle = TAU * float(i) / float(num_dots) + randf_range(-0.2, 0.2)
+		var dist = randf_range(90.0, 160.0)
+		var dot_r = randf_range(4.0, 8.0)
+
+		var dot = Line2D.new()
+		dot.width = randf_range(2.5, 4.5)
+		dot.default_color = Color(1.0, randf_range(0.75, 1.0), randf_range(0.0, 0.15), 1.0)
+		dot.joint_mode = Line2D.LINE_JOINT_ROUND
+		dot.begin_cap_mode = Line2D.LINE_CAP_ROUND
+		dot.end_cap_mode = Line2D.LINE_CAP_ROUND
+		dot.z_index = 25
+		var dot_pts: Array[Vector2] = []
+		for j in range(9):
+			var a = TAU * float(j) / 8.0
+			dot_pts.append(Vector2(cos(a), sin(a)) * dot_r)
+		dot.points = dot_pts
+		dot.position = center
+		add_child(dot)
+
+		var delay = float(i) / float(num_dots) * 0.12
+		var outward: Vector2 = center + Vector2(cos(angle), sin(angle)) * dist
+		var t = create_tween().set_parallel(true)
+		t.tween_property(dot, "position", outward, 0.85 - delay * 0.4) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT).set_delay(delay)
+		t.tween_property(dot, "modulate:a", 0.0, 0.35) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN).set_delay(0.55 + delay)
+		t.chain().tween_callback(dot.queue_free)
+
+	var burst = Line2D.new()
+	burst.z_index = 26
+	burst.width = 7.0
+	burst.default_color = Color(1.0, 0.95, 0.25, 1.0)
+	burst.joint_mode = Line2D.LINE_JOINT_ROUND
+	burst.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	burst.end_cap_mode = Line2D.LINE_CAP_ROUND
+	add_child(burst)
+	var t_burst = create_tween().set_parallel(true)
+	t_burst.tween_method(func(r: float):
+		if is_instance_valid(burst):
+			var alpha = 1.0 - (r / 180.0)
+			burst.default_color = Color(1.0, 0.95, 0.2, alpha)
+			var pts: Array[Vector2] = []
+			for j in range(33):
+				var a = TAU * float(j) / 32.0
+				pts.append(center + Vector2(cos(a), sin(a)) * r)
+			burst.points = pts
+	, 0.0, 180.0, 0.45).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	t_burst.tween_property(burst, "modulate:a", 0.0, 0.25).set_delay(0.25)
+	t_burst.chain().tween_callback(burst.queue_free)
+
+
 func generate_infinity_content(from_y: float, to_y: float):
 	# Delimitar región
 	var start_y_grid = int(from_y / GRID_SIZE)
@@ -913,12 +1188,10 @@ func generate_infinity_content(from_y: float, to_y: float):
 		if not astar.is_point_solid(cell):
 			var r_type = "green_heart"
 			var roll = randf()
-			if roll < 0.75:
+			if roll < 0.8:
 				r_type = "green_heart"
-			elif roll < 0.95:
-				r_type = "red_heart"
 			else:
-				r_type = "hourglass"
+				r_type = "red_heart"
 				
 			var reward = Panel.new()
 			reward.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
@@ -1004,6 +1277,8 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 	
 	# Comprobar recolección de recompensas
 	for reward in rewards_container.get_children():
+		if not reward is Control:
+			continue
 		var reward_center = reward.position + reward.size / 2.0
 		if grid_pos.distance_to(reward_center) < GRID_SIZE / 2.0:
 			if reward.has_meta("type") and reward.get_meta("type") == "hourglass":
@@ -1044,8 +1319,9 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 			if reward.has_meta("type") and reward.get_meta("type") == "infinity":
 				# Activar Power-up de Infinito
 				infinity_powerup_active = true
-				infinity_start_delay = 0.5
+				infinity_start_delay = 1.0
 				pre_powerup_camera_speed = target_camera_speed
+				_boost_music_pitch_for_infinity()
 				
 				# Cancelar dibujo actual
 				is_drawing = false
@@ -1083,40 +1359,66 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				root_line.points = current_path
 				
 				# Generar el contenido procedimental del descenso (obstáculos y corazones)
-				generate_infinity_content(descendant.position.y, descendant.position.y + 77 * GRID_SIZE)
+				generate_infinity_content(descendant.position.y, descendant.position.y + 90 * GRID_SIZE)
 				
-				# Generar el camino de descenso automático
+				# Generar el camino de descenso automático — diagonal directa al centro, luego recto
 				var start_cell = get_grid_coord(start_pt)
+				var cx = 18  # columna central
+				var h_dist = abs(start_cell.x - cx)  # cuántas celdas hay que cruzar horizontalmente
+				var diag_end_y = start_cell.y + h_dist  # la diagonal baja tanto como se mueve de lado
 				
-				# Ir hacia abajo y al centro (x = 18) en 12 celdas
-				var target_center_row = start_cell.y + 12
-				
-				# AStar temporal sin obstáculos
-				var temp_astar = AStarGrid2D.new()
-				var min_y = start_cell.y
-				var max_y = target_center_row
-				var min_x = min(start_cell.x, 18)
-				var max_x = max(start_cell.x, 18)
-				temp_astar.region = Rect2i(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
-				temp_astar.cell_size = Vector2(GRID_SIZE, GRID_SIZE)
-				temp_astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
-				temp_astar.update()
-				
-				var path_cells = temp_astar.get_id_path(start_cell, Vector2i(18, target_center_row))
+				# La punta se mueve en línea recta hacia este único punto → visual completamente diagonal
 				auto_descent_points.clear()
-				for cell in path_cells:
-					auto_descent_points.append(get_grid_pos(Vector2(cell.x * GRID_SIZE, cell.y * GRID_SIZE)))
-					
-				if auto_descent_points.size() == 0:
-					auto_descent_points.append(start_pt)
-					
-				# Continuar recto hacia abajo (65 celdas más para un total de 77)
-				var total_descent_y = start_cell.y + 77
-				for y in range(target_center_row + 1, total_descent_y + 1):
-					auto_descent_points.append(get_grid_pos(Vector2(18 * GRID_SIZE, y * GRID_SIZE)))
-					
+				auto_descent_points.append(get_grid_pos(Vector2(cx * GRID_SIZE, diag_end_y * GRID_SIZE)))
+				
+				# Continuar recto hacia abajo hasta completar 77 filas desde el inicio
+				var total_descent_y = start_cell.y + 90
+				for y in range(diag_end_y + 1, total_descent_y + 1):
+					auto_descent_points.append(get_grid_pos(Vector2(cx * GRID_SIZE, y * GRID_SIZE)))
+				
 				auto_descent_tip_pos = start_pt
-				auto_descent_index = 1
+				auto_descent_index = 0
+				
+				# Efecto de carga: partículas doradas que convergen durante el segundo de pausa
+				_spawn_infinity_charge_particles(start_pt)
+				
+				# Destello pulsante en la punta del hilo dorado
+				_infinity_tip_glow = Node2D.new()
+				_infinity_tip_glow.position = _get_infinity_tip_visual_pos()
+				# Anillo exterior
+				var tip_ring = Line2D.new()
+				tip_ring.width = 3.5
+				tip_ring.default_color = Color(1.0, 0.95, 0.3, 0.85)
+				tip_ring.joint_mode = Line2D.LINE_JOINT_ROUND
+				tip_ring.begin_cap_mode = Line2D.LINE_CAP_ROUND
+				tip_ring.end_cap_mode = Line2D.LINE_CAP_ROUND
+				var tip_ring_pts: Array[Vector2] = []
+				for j in range(17):
+					var a = TAU * float(j) / 16.0
+					tip_ring_pts.append(Vector2(cos(a), sin(a)) * 14.0)
+				tip_ring.points = tip_ring_pts
+				_infinity_tip_glow.add_child(tip_ring)
+				# Núcleo interior brillante
+				var tip_core = Line2D.new()
+				tip_core.width = 5.0
+				tip_core.default_color = Color(1.0, 1.0, 0.7, 1.0)
+				tip_core.joint_mode = Line2D.LINE_JOINT_ROUND
+				tip_core.begin_cap_mode = Line2D.LINE_CAP_ROUND
+				tip_core.end_cap_mode = Line2D.LINE_CAP_ROUND
+				var tip_core_pts: Array[Vector2] = []
+				for j in range(9):
+					var a = TAU * float(j) / 8.0
+					tip_core_pts.append(Vector2(cos(a), sin(a)) * 5.0)
+				tip_core.points = tip_core_pts
+				_infinity_tip_glow.add_child(tip_core)
+				roots_container.add_child(_infinity_tip_glow)
+				_infinity_tip_glow.z_index = 10
+				# Pulso continuo: crece y encoge de forma cíclica
+				var t_pulse = create_tween().set_loops()
+				t_pulse.tween_property(_infinity_tip_glow, "scale", Vector2(1.5, 1.5), 0.22) \
+					.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+				t_pulse.tween_property(_infinity_tip_glow, "scale", Vector2(0.65, 0.65), 0.22) \
+					.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 				
 				# Desactivar la velocidad de scroll normal para que la cámara siga a la raíz
 				camera_speed = 0.0
@@ -1386,6 +1688,8 @@ func generate_procedural_generation_content(child: PortraitFrame, new_partner: P
 			t.tween_callback(obs.queue_free)
 			
 	for rew in rewards_container.get_children():
+		if not rew is Control:
+			continue
 		if rew.is_queued_for_deletion() or rew.has_meta("dying"): continue
 		var rew_rect = Rect2(rew.position, rew.size)
 		if rew_rect.intersects(line_clear_rect) or rew_rect.intersects(child_clear_rect) or rew_rect.intersects(partner_clear_rect):
@@ -3982,6 +4286,11 @@ func _collect_reward_programmatically(reward):
 		return
 	reward.set_meta("dying", true)
 	
+	# Posición en pantalla antes de quitar el panel del mundo (evita que siga en el hilo)
+	var screen_pos: Vector2 = reward.global_position - camera.position - Vector2(32, 12)
+	reward.hide()
+	reward.queue_free()
+	
 	var rtype = reward.get_meta("type") if reward.has_meta("type") else "heart"
 	if rtype == "red_heart":
 		sap += 5
@@ -3989,7 +4298,7 @@ func _collect_reward_programmatically(reward):
 		
 		var flying_lbl = HBoxContainer.new()
 		flying_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
-		flying_lbl.position = reward.global_position - camera.position - Vector2(32, 12)
+		flying_lbl.position = screen_pos
 		flying_lbl.size = Vector2(80, 28)
 		flying_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		
@@ -4025,13 +4334,13 @@ func _collect_reward_programmatically(reward):
 				t_pulse.tween_property(_green_score_label, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 				t_pulse.tween_property(_green_score_label, "modulate", Color.WHITE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		)
-	else: # Green Heart / default
+	else: # green_heart / heart / default
 		sap += 1
 		green_squares_collected += 1
 		
 		var flying_lbl = HBoxContainer.new()
 		flying_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
-		flying_lbl.position = reward.global_position - camera.position - Vector2(32, 12)
+		flying_lbl.position = screen_pos
 		flying_lbl.size = Vector2(64, 24)
 		flying_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		
@@ -4067,4 +4376,4 @@ func _collect_reward_programmatically(reward):
 				t_pulse.tween_property(_green_score_label, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 				t_pulse.tween_property(_green_score_label, "modulate", Color.WHITE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		)
-	reward.queue_free()
+	update_ui()
