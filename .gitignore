@@ -3,3 +3,5 @@
 /android/
 Contexto/godot-mcp
 /Contexto
+*.zip
+build/

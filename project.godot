@@ -17,7 +17,18 @@ boot_splash/bg_color=Color(0.027451, 0.0235294, 0.0392157, 1)
 boot_splash/stretch_mode=0
 boot_splash/use_filter=false
 boot_splash/image="uid://cwheul1lrfiqo"
-config/icon="res://icon.svg"
+boot_splash/minimum_display_time=1500
+boot_splash/fullsize=true
+config/icon="res://icon.png"
+config/windows_native_icon="res://icon.ico"
+
+[display]
+
+window/size/viewport_width=1152
+window/size/viewport_height=648
+window/size/mode=3
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [audio]
 

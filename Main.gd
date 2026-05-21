@@ -94,15 +94,26 @@ var auto_descent_points: Array[Vector2] = []
 var auto_descent_index: int = 0
 var auto_descent_tip_pos: Vector2 = Vector2.ZERO
 var pre_powerup_camera_speed: float = 15.0
-var pre_powerup_music_pitch: float = 1.0
 const INFINITY_MUSIC_PITCH: float = 1.32
 var _infinity_music_pitch_tween: Tween = null
 var _infinity_tip_glow: Node2D = null
+var _infinity_tip_tween: Tween = null
+
+# Variables para el efecto de ralentización del Reloj de Arena
+const HOURGLASS_MUSIC_PITCH: float = 0.7
 
 # Variables para los difuminados (vignette/fade) superior e inferior
 var _fade_layer: CanvasLayer = null
 var _fade_top: TextureRect = null
 var _fade_bottom: TextureRect = null
+
+# Variables para el sistema de estrellas de fondo
+var _stars_container: Node2D = null
+var _stars_texture: Texture2D = null
+var _star_speed_lines: Array[Line2D] = []
+var _star_instances: Array[Dictionary] = []  # Array de estrellas individuales con sus posiciones
+var _star_stretch_factor: float = 0.0  # Factor de estiramiento actual (para transición suave)
+var _star_slow_factor: float = 0.0  # Factor de lentitud para el hourglass
 
 func _ready():
 	randomize()
@@ -192,6 +203,13 @@ func _ready():
 		
 	# Inicializar los difuminados superior e inferior
 	_setup_fade_overlays()
+	
+	# Inicializar el sistema de estrellas de fondo
+	_setup_stars_background()
+
+	# Conectar señal de redimensionado de pantalla para centrar juego y UI
+	get_viewport().size_changed.connect(_on_viewport_size_changed)
+	_on_viewport_size_changed()
 
 func _process(delta):
 	# Animación de Pulso Rítmico Sincronizado para el Título del Menú Principal
@@ -267,6 +285,32 @@ func _process(delta):
 		if _battery_bar:
 			_battery_bar.queue_redraw()
 			
+	# Actualizar efecto de velocidad de estrellas
+	_update_stars_speed_effect(delta)
+	
+	# Mover las estrellas con la cámara para efecto de paralaje
+	if _stars_container:
+		for star_data in _star_instances:
+			var star = star_data["node"]
+			var depth = star_data["depth"]
+			var base_y = star_data["base_y"]
+			
+			if not is_instance_valid(star):
+				continue
+			
+			# Efecto de paralaje: estrellas más pequeñas (más lejos) se mueven más lento
+			var parallax_factor = 0.2 + (depth / 3.0) * 0.6  # 0.2 a 0.8
+			star.position.y = base_y + camera.position.y * parallax_factor
+			
+			# Si la estrella sale muy por abajo, moverla arriba para loop infinito
+			if star.position.y > camera.position.y + 800:
+				star.position.y -= 2000
+				star_data["base_y"] -= 2000
+			# Si sale muy por arriba, moverla abajo
+			elif star.position.y < camera.position.y - 800:
+				star.position.y += 2000
+				star_data["base_y"] += 2000
+	
 	# Procesamiento continuo de dibujo o retracción (bloqueado si el Power-up de Infinito está activo)
 	if infinity_powerup_active:
 		# Mantener savia a tope
@@ -344,9 +388,12 @@ func _process(delta):
 		else:
 			# Fin del trayecto del Power-up de Infinito
 			infinity_powerup_active = false
-			_restore_music_pitch_after_infinity()
+			_update_music_pitch(1.0)
 			
-			# Apagar destello de la punta
+			# Apagar destello de la punta y matar su animación infinita
+			if _infinity_tip_tween:
+				_infinity_tip_tween.kill()
+				_infinity_tip_tween = null
 			if is_instance_valid(_infinity_tip_glow):
 				var t_glow_out = create_tween()
 				t_glow_out.tween_property(_infinity_tip_glow, "modulate:a", 0.0, 0.3)
@@ -354,38 +401,49 @@ func _process(delta):
 				_infinity_tip_glow = null
 			
 			var final_pt = auto_descent_points[-1]
+			print("[INF] A: spawn portrait particles")
 			_spawn_infinity_portrait_particles(final_pt)
-
+			print("[INF] B: fade line start")
 			# Desvanecer la línea de dibujo del descenso (root_line) de brillante dorado a dorado apagado (mismo apagado que el normal)
 			var old_descent_line = root_line
 			var t_fade_line = create_tween().set_parallel(true)
 			t_fade_line.tween_property(old_descent_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
 			
-			# Crear y animar el enroscado gris (hélice) en toda la línea de bajada
+			print("[INF] C: create_wrapping_helix")
+			# Crear el enroscado gris (hélice) — fade-in simple para no crear arrays grandes cada frame en WASM
 			var descent_helix = create_wrapping_helix(current_path)
+			descent_helix.modulate.a = 0.0
 			roots_container.add_child(descent_helix)
-			var descent_full_points = descent_helix.points
-			descent_helix.points = []
 			
-			t_fade_line.tween_method(func(pct: float):
-				if is_instance_valid(descent_helix):
-					var count = int(pct * descent_full_points.size())
-					descent_helix.points = descent_full_points.slice(0, count)
-			, 0.0, 1.0, 1.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+			# Aparecer con fade-in suave en lugar de animación punto a punto (evita freeze WASM)
+			t_fade_line.tween_property(descent_helix, "modulate:a", 0.85, 1.0) \
+				.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 			
-			# Hacer brotar los pinchitos/espinas físicas en todo el camino del descenso
-			spawn_growing_thorns(current_path, 0.0, 1.0)
+			print("[INF] D: spawn_growing_thorns path.size=", current_path.size())
+			# Diferir espinas con camino submuestreado para reducir tweens paralelos en WASM
+			# (cada 4 puntos = ~30 espinas en lugar de ~139)
+			var _thorns_path: Array[Vector2] = []
+			for ti in range(0, current_path.size(), 4):
+				_thorns_path.append(current_path[ti])
+			if current_path.size() > 0:
+				_thorns_path.append(current_path[-1])
+			get_tree().create_timer(0.1).timeout.connect(func():
+				print("[INF] D2: spawning thorns now, subsampled=", _thorns_path.size())
+				spawn_growing_thorns(_thorns_path, 0.0, 1.0)
+				print("[INF] D3: thorns done")
+			)
 			
+			print("[INF] E: all_previous_paths append")
 			for p in current_path:
 				all_previous_paths.append(p)
 				_occupied_previous_points[p] = true
-				
-			# Eliminar los retratos viejos (ancestor y descendant)
+			print("[INF] F: free old portraits")
 			if ancestor:
 				ancestor.queue_free()
 			if descendant:
 				descendant.queue_free()
 				
+			print("[INF] G: create child portrait")
 			# Instanciar el Hijo único (child) al final de la caída
 			var child = PortraitFrame.new()
 			child.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
@@ -410,6 +468,7 @@ func _process(delta):
 			
 			ancestor = child
 			
+			print("[INF] H: create partner portrait")
 			# Instanciar la nueva Pareja (partner) cerca del hijo
 			var new_partner = PortraitFrame.new()
 			new_partner.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
@@ -444,12 +503,25 @@ func _process(delta):
 			
 			descendant = new_partner
 			
+			print("[INF] I: setup deferred generation + new root_line")
 			# Generar de forma normal todo el contenido procedural (bloques, corazones, etc.) para el nuevo nivel
-			var line_clear_rect = Rect2(
-				Vector2(final_pt.x - GRID_SIZE, final_pt.y - 85 * GRID_SIZE),
-				Vector2(GRID_SIZE * 2, 90 * GRID_SIZE)
+			# Diferir la generación procedural al siguiente frame para no bloquear WASM
+			var _child_ref = child
+			var _partner_ref = new_partner
+			var _final = final_pt
+			var _pgc = partner_grid_center
+			var _lcr = Rect2(
+				Vector2(final_pt.x - GRID_SIZE, final_pt.y - 125 * GRID_SIZE),
+				Vector2(GRID_SIZE * 2, 130 * GRID_SIZE)
 			)
-			generate_procedural_generation_content(child, new_partner, final_pt, partner_grid_center, line_clear_rect)
+			get_tree().create_timer(0.05).timeout.connect(func():
+				print("[DEFERRED] Timer fired. child valid?", is_instance_valid(_child_ref), "partner valid?", is_instance_valid(_partner_ref))
+				if is_instance_valid(_child_ref) and is_instance_valid(_partner_ref):
+					print("[DEFERRED] Invoking generate_procedural_generation_content")
+					generate_procedural_generation_content(_child_ref, _partner_ref, _final, _pgc, _lcr)
+				else:
+					print("[DEFERRED] WARNING: Cannot generate procedural content, instances invalid!")
+			)
 			
 			# Iniciar la nueva línea de dibujo desde el hijo
 			root_line = Line2D.new()
@@ -517,6 +589,8 @@ func _process(delta):
 		
 		if hourglass_time_left <= 0.0:
 			hourglass_stack = 0
+			# Restaurar el pitch de la música
+			_update_music_pitch(1.0)
 			
 		# Actualizar el texto del multiplicador
 		if _hourglass_ui:
@@ -844,6 +918,11 @@ func _draw():
 	# Dibujar la cuadrícula solo en el área visible de la cámara
 	var start_y = int(camera.position.y / GRID_SIZE) * GRID_SIZE
 	var end_y = start_y + 648 + GRID_SIZE * 2
+	
+	# Extender la cuadrícula más abajo durante el modo infinito para que no se vea vacío
+	if infinity_powerup_active:
+		end_y += 400  # Extender 400px más abajo durante el infinito
+	
 	var grid_color = Color(1, 1, 1, 0.05) # Muy sutil
 	
 	# Líneas verticales
@@ -855,6 +934,10 @@ func _draw():
 		draw_line(Vector2(0, y), Vector2(1152, y), grid_color, 1.0)
 
 func _input(event):
+	if event is InputEventKey and event.pressed and event.keycode == KEY_F11:
+		_toggle_fullscreen()
+		return
+		
 	if game_over or waiting_for_next or in_menu or infinity_powerup_active:
 		return
 		
@@ -940,13 +1023,22 @@ func _set_music_pitch(target: float, duration: float = 0.0) -> void:
 	_infinity_music_pitch_tween.tween_property(_music_player, "pitch_scale", target, duration) \
 		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
-func _boost_music_pitch_for_infinity() -> void:
-	if _music_player:
-		pre_powerup_music_pitch = _music_player.pitch_scale
-	_set_music_pitch(INFINITY_MUSIC_PITCH, 0.85)
-
-func _restore_music_pitch_after_infinity() -> void:
-	_set_music_pitch(pre_powerup_music_pitch, 1.0)
+func _update_music_pitch(duration: float = 0.5) -> void:
+	if not _music_player:
+		return
+		
+	var target_pitch = 1.0
+	if infinity_powerup_active:
+		target_pitch = INFINITY_MUSIC_PITCH
+	elif hourglass_stack > 0:
+		if hourglass_stack == 1:
+			target_pitch = HOURGLASS_MUSIC_PITCH
+		elif hourglass_stack == 2:
+			target_pitch = 0.55
+		else:
+			target_pitch = 0.42
+			
+	_set_music_pitch(target_pitch, duration)
 
 func _get_infinity_tip_visual_pos() -> Vector2:
 	# Punta del hilo + un poco hacia delante para tapar la sombra del cap redondo
@@ -1178,8 +1270,8 @@ func generate_infinity_content(from_y: float, to_y: float):
 		var t = create_tween()
 		t.tween_property(obs, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(randf_range(0.0, 0.3))
 		
-	# Generar recompensas (Savia y Corazones)
-	var num_rewards = randi_range(15, 25)
+	# Generar recompensas (Savia y Corazones) - más durante el modo infinito
+	var num_rewards = randi_range(40, 60)
 	for i in range(num_rewards):
 		var rx = randi_range(2, max_grid_x - 3)
 		var ry = randi_range(start_y_grid + 2, end_y_grid - 4)
@@ -1188,7 +1280,7 @@ func generate_infinity_content(from_y: float, to_y: float):
 		if not astar.is_point_solid(cell):
 			var r_type = "green_heart"
 			var roll = randf()
-			if roll < 0.8:
+			if roll < 0.7:
 				r_type = "green_heart"
 			else:
 				r_type = "red_heart"
@@ -1287,6 +1379,9 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				# Reiniciar el temporizador al máximo de la pila actual (6s para x1, 12s para x2, 18s para x3)
 				hourglass_time_left = hourglass_max_duration * hourglass_stack
 				
+				# Ralentizar la música
+				_update_music_pitch(0.5)
+				
 				# Crear un flotador de texto y textura neón morado/violeta ("⏳ ¡LENTO!")
 				var slow_lbl = HBoxContainer.new()
 				slow_lbl.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -1321,7 +1416,7 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				infinity_powerup_active = true
 				infinity_start_delay = 1.0
 				pre_powerup_camera_speed = target_camera_speed
-				_boost_music_pitch_for_infinity()
+				_update_music_pitch(0.85)
 				
 				# Cancelar dibujo actual
 				is_drawing = false
@@ -1359,7 +1454,8 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				root_line.points = current_path
 				
 				# Generar el contenido procedimental del descenso (obstáculos y corazones)
-				generate_infinity_content(descendant.position.y, descendant.position.y + 90 * GRID_SIZE)
+				# Generar desde la posición actual de la cámara para cubrir el área del delay
+				generate_infinity_content(camera.position.y, descendant.position.y + 130 * GRID_SIZE)
 				
 				# Generar el camino de descenso automático — diagonal directa al centro, luego recto
 				var start_cell = get_grid_coord(start_pt)
@@ -1372,7 +1468,7 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				auto_descent_points.append(get_grid_pos(Vector2(cx * GRID_SIZE, diag_end_y * GRID_SIZE)))
 				
 				# Continuar recto hacia abajo hasta completar 77 filas desde el inicio
-				var total_descent_y = start_cell.y + 90
+				var total_descent_y = start_cell.y + 130
 				for y in range(diag_end_y + 1, total_descent_y + 1):
 					auto_descent_points.append(get_grid_pos(Vector2(cx * GRID_SIZE, y * GRID_SIZE)))
 				
@@ -1413,11 +1509,11 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				_infinity_tip_glow.add_child(tip_core)
 				roots_container.add_child(_infinity_tip_glow)
 				_infinity_tip_glow.z_index = 10
-				# Pulso continuo: crece y encoge de forma cíclica
-				var t_pulse = create_tween().set_loops()
-				t_pulse.tween_property(_infinity_tip_glow, "scale", Vector2(1.5, 1.5), 0.22) \
+				# Pulso continuo: crece y encoge de forma cíclica (vinculado al nodo para auto-liberarse al destruirse)
+				_infinity_tip_tween = create_tween().bind_node(_infinity_tip_glow).set_loops()
+				_infinity_tip_tween.tween_property(_infinity_tip_glow, "scale", Vector2(1.5, 1.5), 0.22) \
 					.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-				t_pulse.tween_property(_infinity_tip_glow, "scale", Vector2(0.65, 0.65), 0.22) \
+				_infinity_tip_tween.tween_property(_infinity_tip_glow, "scale", Vector2(0.65, 0.65), 0.22) \
 					.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 				
 				# Desactivar la velocidad de scroll normal para que la cámara siga a la raíz
@@ -1674,10 +1770,12 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 				t.tween_property(_green_score_label, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 func generate_procedural_generation_content(child: PortraitFrame, new_partner: PortraitFrame, child_grid_center: Vector2, partner_grid_center: Vector2, line_clear_rect: Rect2) -> void:
+	print("[GEN_PROC] Start")
 	# 2. Las zonas seguras (5x5) alrededor del hijo y la pareja
 	var child_clear_rect = Rect2(child.position - Vector2(GRID_SIZE, GRID_SIZE), Vector2(GRID_SIZE * 5, GRID_SIZE * 5))
 	var partner_clear_rect = Rect2(new_partner.position - Vector2(GRID_SIZE, GRID_SIZE), Vector2(GRID_SIZE * 5, GRID_SIZE * 5))
 	
+	print("[GEN_PROC] Clearing overlapping obstacles/rewards")
 	for obs in obstacles.get_children():
 		if obs.is_queued_for_deletion() or obs.has_meta("dying"): continue
 		var obs_rect = Rect2(obs.position, obs.size)
@@ -1702,6 +1800,7 @@ func generate_procedural_generation_content(child: PortraitFrame, new_partner: P
 	var child_coord = get_grid_coord(child_grid_center)
 	var partner_coord = get_grid_coord(partner_grid_center)
 	
+	print("[GEN_PROC] Setting up AStarGrid2D")
 	var astar = AStarGrid2D.new()
 	var top_y = min(child_coord.y, partner_coord.y) - 4
 	var bottom_y = max(child_coord.y, partner_coord.y) + 6
@@ -1754,13 +1853,7 @@ func generate_procedural_generation_content(child: PortraitFrame, new_partner: P
 			continue
 			
 		astar.set_point_solid(cell, true)
-		
-		# Garantizar que el puzzle SIEMPRE se puede resolver
-		if astar.get_id_path(child_coord, partner_coord).size() == 0:
-			# Si corta el único camino, deshacemos
-			astar.set_point_solid(cell, false)
-		else:
-			placed_obstacles.append(cell)
+		placed_obstacles.append(cell)
 			
 	# Dibujar los obstáculos
 	for cell in placed_obstacles:
@@ -1775,7 +1868,7 @@ func generate_procedural_generation_content(child: PortraitFrame, new_partner: P
 		var t = create_tween()
 		t.tween_property(obs, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT).set_delay(randf_range(0.0, 0.3))
 		
-	# Dibujar recompensas (Savia) en celdas vacías
+	# Dibujar recompensas (Savia) en celdas vacías - solo corazones verdes
 	var num_rewards = randi_range(2, 6)
 	for i in range(num_rewards):
 		var rx = randi_range(2, max_grid_x - 3)
@@ -1820,29 +1913,17 @@ func generate_procedural_generation_content(child: PortraitFrame, new_partner: P
 				icon_rect.offset_top = 4
 				icon_rect.offset_bottom = -4
 				
-				# 50/50 de probabilidad entre Corazón Verde e Infinito Dorado
-				if randf() < 0.5:
-					reward.set_meta("type", "heart")
-					style.bg_color = Color(0.02, 0.15, 0.05, 1.0) # Fondo verde bosque oscuro
-					style.border_width_left = 2
-					style.border_width_top = 2
-					style.border_width_right = 2
-					style.border_width_bottom = 2
-					style.border_color = Color(0.1, 0.9, 0.1, 1.0) # Borde verde neón brillante
-					style.shadow_color = Color(0.1, 0.9, 0.1, 0.4) # Brillo neón verde
-					style.shadow_size = 6
-					icon_rect.texture = load("res://assets/icon_heart_green.png")
-				else:
-					reward.set_meta("type", "infinity")
-					style.bg_color = Color(0.15, 0.12, 0.02, 1.0) # Fondo oro oscuro
-					style.border_width_left = 2
-					style.border_width_top = 2
-					style.border_width_right = 2
-					style.border_width_bottom = 2
-					style.border_color = Color(1.0, 0.85, 0.2, 1.0) # Borde dorado brillante
-					style.shadow_color = Color(1.0, 0.85, 0.2, 0.4) # Brillo neón dorado
-					style.shadow_size = 6
-					icon_rect.texture = load("res://assets/icon_infinity.png")
+				# Siempre corazón verde en las recompensas principales
+				reward.set_meta("type", "heart")
+				style.bg_color = Color(0.02, 0.15, 0.05, 1.0) # Fondo verde bosque oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(0.1, 0.9, 0.1, 1.0) # Borde verde neón brillante
+				style.shadow_color = Color(0.1, 0.9, 0.1, 0.4) # Brillo neón verde
+				style.shadow_size = 6
+				icon_rect.texture = load("res://assets/icon_heart_green.png")
 				
 				reward.add_theme_stylebox_override("panel", style)
 				reward.add_child(icon_rect)
@@ -1978,6 +2059,68 @@ func generate_procedural_generation_content(child: PortraitFrame, new_partner: P
 				
 				astar.set_point_solid(cell, true)
 				break
+				
+	# === INFINITY: COLECCIONABLE EXCLUSIVO (5% DE PROBABILIDAD) ===
+	if randf() < 0.05:
+		for attempt in range(30):
+			var rx = randi_range(2, max_grid_x - 3)
+			var ry = randi_range(top_y + 1, bottom_y - 1)
+			var cell = Vector2i(rx, ry)
+			
+			# Comprobar cajas seguras 5x5 de hijo y pareja
+			var in_child_box = abs(cell.x - child_coord.x) <= 2 and abs(cell.y - child_coord.y) <= 2
+			var in_partner_box = abs(cell.x - partner_coord.x) <= 2 and abs(cell.y - partner_coord.y) <= 2
+			if in_child_box or in_partner_box:
+				continue
+				
+			var cell_rect = Rect2(Vector2(cell.x * GRID_SIZE, cell.y * GRID_SIZE), Vector2(GRID_SIZE, GRID_SIZE))
+			if cell_rect.intersects(line_clear_rect):
+				continue
+				
+			if astar.is_point_solid(cell):
+				continue
+				
+			if astar.get_id_path(child_coord, cell).size() > 0:
+				var infinity = Panel.new()
+				infinity.size = Vector2(GRID_SIZE * 0.7, GRID_SIZE * 0.7)
+				infinity.position = Vector2(cell.x * GRID_SIZE + GRID_SIZE * 0.15, cell.y * GRID_SIZE + GRID_SIZE * 0.15)
+				infinity.set_meta("type", "infinity")
+				
+				var style = StyleBoxFlat.new()
+				style.bg_color = Color(0.15, 0.12, 0.02, 1.0) # Fondo oro oscuro
+				style.border_width_left = 2
+				style.border_width_top = 2
+				style.border_width_right = 2
+				style.border_width_bottom = 2
+				style.border_color = Color(1.0, 0.85, 0.2, 1.0) # Borde dorado brillante
+				style.shadow_color = Color(1.0, 0.85, 0.2, 0.4) # Brillo neón dorado
+				style.shadow_size = 6
+				infinity.add_theme_stylebox_override("panel", style)
+				
+				var icon_rect = TextureRect.new()
+				icon_rect.texture = load("res://assets/icon_infinity.png")
+				icon_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+				icon_rect.grow_horizontal = Control.GROW_DIRECTION_BOTH
+				icon_rect.grow_vertical = Control.GROW_DIRECTION_BOTH
+				icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				icon_rect.offset_left = 4
+				icon_rect.offset_right = -4
+				icon_rect.offset_top = 4
+				icon_rect.offset_bottom = -4
+				infinity.add_child(icon_rect)
+				
+				infinity.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				infinity.pivot_offset = infinity.size / 2.0
+				infinity.scale = Vector2.ZERO
+				rewards_container.add_child(infinity)
+				
+				var t_inf = create_tween()
+				t_inf.tween_property(infinity, "scale", Vector2.ONE, randf_range(0.3, 0.6)).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+				
+				astar.set_point_solid(cell, true)
+				break
+	print("[GEN_PROC] Done")
 
 func start_next_generation():
 	waiting_for_next = false
@@ -2513,6 +2656,14 @@ func _create_menu_half(lang: String, x_offset: float) -> Control:
 	leader_btn.position = Vector2((1152 - 280) / 2, 390)
 	leader_btn.pressed.connect(_on_leaderboard_pressed)
 	
+	if OS.get_name() != "Web":
+		var exit_btn = Button.new()
+		exit_btn.name = "ExitButton"
+		half.add_child(exit_btn)
+		_style_menu_button(exit_btn, "EXIT" if lang == "en" else "SALIR")
+		exit_btn.position = Vector2((1152 - 280) / 2, 480)
+		exit_btn.pressed.connect(func(): get_tree().quit())
+	
 	# Contenedor de selección de idioma (Banderas en la esquina superior derecha)
 	var lang_selector = HBoxContainer.new()
 	lang_selector.name = "LangSelector"
@@ -2928,16 +3079,23 @@ func _on_play_pressed():
 		{
 			"title_en": "ENERGY",
 			"title_es": "ENERGÍA",
-			"desc_en": "Your life meter\nDrawing paths drains energy\nIf empty (0), you lose!",
-			"desc_es": "Tu medidor de vida\nDibujar caminos drena tu energía\n¡Si llega a 0, perderás!",
+			"desc_en": "Drawing paths drains energy\nIf empty (0), you lose!",
+			"desc_es": "Dibujar caminos drena energía\n¡Si llega a 0, perderás!",
 			"color": Color(1.0, 0.85, 0.15) # Oro
 		},
 		{
-			"title_en": "PATH RETRACTION PENALTY",
-			"title_es": "PENALIZACIÓN AL RETRAER",
-			"desc_en": "Right-Click retracts paths but only refunds\n33% of the energy cost (1/3)",
-			"desc_es": "El click derecho retrae caminos, pero solo\ndevuelve el 33% de la energía (1/3)",
+			"title_en": "RETRACTION PENALTY",
+			"title_es": "PENALIZACIÓN",
+			"desc_en": "Right-Click retracts paths\nbut only refunds\n33% of the energy cost (1/3)",
+			"desc_es": "El click derecho retrae\ncaminos, pero solo devuelve\nel 33% de la energía (1/3)",
 			"color": Color(1.0, 0.4, 0.4) # Rojo peligro
+		},
+		{
+			"title_en": "",
+			"title_es": "",
+			"desc_en": "",
+			"desc_es": "",
+			"color": Color(0.9, 0.7, 0.1) # Oro/Dorado
 		}
 	]
 	
@@ -2945,8 +3103,8 @@ func _on_play_pressed():
 		var data = sap_cols[i]
 		
 		var card = Panel.new()
-		card.size = Vector2(436, 104) # Altura de 104
-		card.position = Vector2(16 + 452 * i, 16)
+		card.size = Vector2(284, 104) # Altura de 104, ancho de 284
+		card.position = Vector2(17 + 301 * i, 16)
 		
 		var card_style = StyleBoxFlat.new()
 		card_style.bg_color = Color(0.06, 0.06, 0.08, 0.95)
@@ -2954,7 +3112,8 @@ func _on_play_pressed():
 		card_style.border_width_top = 2
 		card_style.border_width_right = 2
 		card_style.border_width_bottom = 2
-		card_style.border_color = data["color"] * 0.4
+		# Hacer que la tarjeta del misterio resalte con borde dorado más brillante
+		card_style.border_color = data["color"] * (0.75 if i == 2 else 0.4)
 		card_style.corner_radius_top_left = 10
 		card_style.corner_radius_top_right = 10
 		card_style.corner_radius_bottom_left = 10
@@ -2962,50 +3121,73 @@ func _on_play_pressed():
 		card.add_theme_stylebox_override("panel", card_style)
 		_sap_tutorial_panel.add_child(card)
 		
-		var title_lbl = Label.new()
-		title_lbl.text = data["title_en"] if current_language == "en" else data["title_es"]
-		title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		title_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		title_lbl.size = Vector2(200, 24) if i == 0 else Vector2(412, 24)
-		title_lbl.position = Vector2(12, 12)
-		if _title_font:
-			title_lbl.add_theme_font_override("font", _title_font)
-		title_lbl.add_theme_font_size_override("font_size", 14)
-		title_lbl.add_theme_color_override("font_color", data["color"])
-		title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
-		title_lbl.add_theme_constant_override("outline_size", 5)
-		card.add_child(title_lbl)
-		
-		var desc_lbl = Label.new()
-		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		desc_lbl.text = data["desc_en"] if current_language == "en" else data["desc_es"]
-		desc_lbl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-		desc_lbl.position = Vector2(12, 36) if i == 0 else Vector2(12, 46) # Posición diferenciada para dar aire al título
-		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		if _body_font:
-			desc_lbl.add_theme_font_override("font", _body_font)
-		desc_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9, 1.0))
-		desc_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
-		desc_lbl.add_theme_constant_override("outline_size", 4)
-		card.add_child(desc_lbl)
-		
-		if i == 0:
-			desc_lbl.add_theme_font_size_override("font_size", 12)
-			desc_lbl.custom_minimum_size = Vector2(200, 60)
-			desc_lbl.size = Vector2(200, 60)
+		if i != 2:
+			var title_lbl = Label.new()
+			title_lbl.text = data["title_en"] if current_language == "en" else data["title_es"]
+			title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			title_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			title_lbl.size = Vector2(260, 24)
+			title_lbl.position = Vector2(12, 10)
+			if _title_font:
+				title_lbl.add_theme_font_override("font", _title_font)
+			title_lbl.add_theme_font_size_override("font_size", 12)
+			title_lbl.add_theme_color_override("font_color", data["color"])
+			title_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+			title_lbl.add_theme_constant_override("outline_size", 5)
+			card.add_child(title_lbl)
 			
-			# ¡DIBUJAR LA BATERÍA ENTERA DE SAVIA ORIGINAL DEL JUEGO!
-			var preview_bat = Control.new()
-			preview_bat.name = "PreviewBatteryBar"
-			preview_bat.size = Vector2(240, 44)
-			preview_bat.position = Vector2(220, 38) # Desplazada sutilmente a x = 220 para dejar aire al texto
-			preview_bat.scale = Vector2(0.8, 0.8) # Reducida un 20% para encajar con finura suprema
-			preview_bat.draw.connect(_draw_preview_battery_bar.bind(preview_bat))
-			card.add_child(preview_bat)
+			var desc_lbl = Label.new()
+			desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			desc_lbl.text = data["desc_en"] if current_language == "en" else data["desc_es"]
+			desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			desc_lbl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+			if _body_font:
+				desc_lbl.add_theme_font_override("font", _body_font)
+			desc_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9, 1.0))
+			desc_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+			desc_lbl.add_theme_constant_override("outline_size", 4)
+			desc_lbl.add_theme_font_size_override("font_size", 11)
+			card.add_child(desc_lbl)
+			
+			if i == 0:
+				desc_lbl.position = Vector2(12, 32)
+				desc_lbl.custom_minimum_size = Vector2(260, 42)
+				desc_lbl.size = Vector2(260, 42)
+				
+				var preview_bat = Control.new()
+				preview_bat.name = "PreviewBatteryBar"
+				preview_bat.size = Vector2(240, 44)
+				preview_bat.position = Vector2(92, 74)
+				preview_bat.scale = Vector2(0.42, 0.42)
+				preview_bat.draw.connect(_draw_preview_battery_bar.bind(preview_bat))
+				card.add_child(preview_bat)
+			elif i == 1:
+				desc_lbl.position = Vector2(12, 32)
+				desc_lbl.custom_minimum_size = Vector2(260, 60)
+				desc_lbl.size = Vector2(260, 60)
 		else:
-			desc_lbl.add_theme_font_size_override("font_size", 14) # Letra gigante de tamaño 14 (igual al título) para máxima legibilidad
-			desc_lbl.custom_minimum_size = Vector2(412, 60)
-			desc_lbl.size = Vector2(412, 60)
+			# i == 2: Solo el símbolo de infinito grande y debajo "¿?"
+			var inf_icon = TextureRect.new()
+			inf_icon.texture = load("res://assets/icon_infinity.png")
+			inf_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			inf_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			inf_icon.size = Vector2(40, 40)
+			inf_icon.position = Vector2((284 - 40) / 2.0, 16)
+			card.add_child(inf_icon)
+			
+			var q_lbl = Label.new()
+			q_lbl.text = "¿?"
+			q_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			q_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			q_lbl.size = Vector2(260, 24)
+			q_lbl.position = Vector2(12, 56)
+			if _title_font:
+				q_lbl.add_theme_font_override("font", _title_font)
+			q_lbl.add_theme_font_size_override("font_size", 24)
+			q_lbl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2, 1.0))
+			q_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+			q_lbl.add_theme_constant_override("outline_size", 5)
+			card.add_child(q_lbl)
 
 	_mechanics_tutorial_panel.show()
 	_mechanics_tutorial_panel.modulate.a = 0.0
@@ -4007,13 +4189,18 @@ func _reset_game_state_to_menu(new_menu_y: float):
 		fade_tween.tween_property(_fade_top, "modulate:a", 0.0, 0.5)
 		fade_tween.tween_property(_fade_bottom, "modulate:a", 0.0, 0.5)
 	
-	# Resetear el estado de la ralentización
+	# Resetear el estado de la ralentización y música
 	hourglass_time_left = 0.0
 	hourglass_stack = 0
 	if _hourglass_ui:
 		_hourglass_ui.hide()
 		_hourglass_ui.scale = Vector2.ZERO
 		_hourglass_ui.modulate.a = 0.0
+	if _music_player:
+		if is_instance_valid(_infinity_music_pitch_tween):
+			_infinity_music_pitch_tween.kill()
+			_infinity_music_pitch_tween = null
+		_music_player.pitch_scale = 1.0
 	
 	if _leaderboard_panel: _leaderboard_panel.hide()
 	if _leaderboard_back_btn: _leaderboard_back_btn.hide()
@@ -4237,10 +4424,16 @@ func _setup_fade_overlays():
 	_fade_top = TextureRect.new()
 	_fade_top.name = "FadeTop"
 	_fade_top.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	_fade_top.size = Vector2(1152, 96) # 96px de alto
-	_fade_top.position = Vector2(0, 0)
 	_fade_top.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_fade_layer.add_child(_fade_top)
+	
+	_fade_top.anchor_left = 0.0
+	_fade_top.anchor_right = 1.0
+	_fade_top.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_fade_top.offset_left = 0
+	_fade_top.offset_right = 0
+	_fade_top.offset_top = 0
+	_fade_top.offset_bottom = 96
 	
 	var gradient_top = Gradient.new()
 	gradient_top.colors = [Color(0.027451, 0.0235294, 0.0392157, 1.0), Color(0.027451, 0.0235294, 0.0392157, 0.0)]
@@ -4259,10 +4452,18 @@ func _setup_fade_overlays():
 	_fade_bottom = TextureRect.new()
 	_fade_bottom.name = "FadeBottom"
 	_fade_bottom.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	_fade_bottom.size = Vector2(1152, 96) # 96px de alto
-	_fade_bottom.position = Vector2(0, 648 - 96)
 	_fade_bottom.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_fade_layer.add_child(_fade_bottom)
+	
+	_fade_bottom.anchor_left = 0.0
+	_fade_bottom.anchor_right = 1.0
+	_fade_bottom.anchor_top = 1.0
+	_fade_bottom.anchor_bottom = 1.0
+	_fade_bottom.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_fade_bottom.offset_left = 0
+	_fade_bottom.offset_right = 0
+	_fade_bottom.offset_top = -96
+	_fade_bottom.offset_bottom = 0
 	
 	var gradient_bottom = Gradient.new()
 	gradient_bottom.colors = [Color(0.027451, 0.0235294, 0.0392157, 0.0), Color(0.027451, 0.0235294, 0.0392157, 1.0)]
@@ -4377,3 +4578,110 @@ func _collect_reward_programmatically(reward):
 				t_pulse.tween_property(_green_score_label, "modulate", Color.WHITE, 0.22).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 		)
 	update_ui()
+
+func _setup_stars_background():
+	# Crear contenedor para las estrellas
+	_stars_container = Node2D.new()
+	_stars_container.name = "StarsBackground"
+	_stars_container.z_index = -10  # Detrás de todo
+	add_child(_stars_container)
+	
+	# Crear estrellas individuales distribuidas en el espacio
+	var num_stars = 200
+	for i in range(num_stars):
+		var star = ColorRect.new()
+		star.name = "Star" + str(i)
+		star.size = Vector2(randf_range(1, 3), randf_range(1, 3))
+		star.color = Color.WHITE
+		
+		# Posición aleatoria en un área grande (para pantallas muy anchas)
+		var star_x = randf_range(-2000, 3152)  # Más ancho para cubrir hasta 4K panorámico
+		var star_y = randf_range(-2000, 500)  # Área vertical grande
+		star.position = Vector2(star_x, star_y)
+		
+		# Paralaje: estrellas más pequeñas = más lejos = se mueven más lento
+		var depth = star.size.x  # Usar tamaño como proxy de profundidad
+		star.set_meta("depth", depth)
+		star.set_meta("base_y", star_y)
+		star.set_meta("base_x", star_x)
+		
+		star.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_stars_container.add_child(star)
+		
+		_star_instances.append({
+			"node": star,
+			"depth": depth,
+			"base_x": star_x,
+			"base_y": star_y
+		})
+
+func _update_stars_speed_effect(delta):
+	# Efecto de velocidad: las estrellas se estiran en líneas cuando el power-up está activo Y la cámara se mueve
+	var camera_moving = infinity_powerup_active and infinity_start_delay <= 0.0
+	var hourglass_active = hourglass_time_left > 0.0
+	
+	# Transición suave del factor de estiramiento (infinity)
+	var target_stretch = 1.0 if camera_moving else 0.0
+	_star_stretch_factor = lerp(_star_stretch_factor, target_stretch, 1.0 - exp(-5.0 * delta))
+	
+	# Transición suave del factor de lentitud (hourglass)
+	var target_slow = 1.0 if hourglass_active else 0.0
+	_star_slow_factor = lerp(_star_slow_factor, target_slow, 1.0 - exp(-5.0 * delta))
+	
+	for star_data in _star_instances:
+		var star = star_data["node"]
+		var depth = star_data["depth"]
+		
+		if not is_instance_valid(star):
+			continue
+		
+		if _star_stretch_factor > 0.01:
+			# Estirar la estrella verticalmente para efecto de velocidad (transición suave)
+			var max_stretch = 20.0 + depth * 10.0  # Estrellas más grandes se estiran más
+			var current_stretch = depth + (max_stretch - depth) * _star_stretch_factor
+			star.size.y = current_stretch
+			
+			# Transición de color suave (dorado)
+			var target_color = Color(1.0, 0.9, 0.6, 1.0)  # Dorado
+			star.color = Color.WHITE.lerp(target_color, _star_stretch_factor)
+			
+			# Mover estrellas más rápido durante el power-up (también con transición)
+			var speed_multiplier = 1.0 + 49.0 * _star_stretch_factor  # 1x a 50x velocidad
+			star.position.y += 30.0 * delta * (depth / 3.0) * speed_multiplier
+			
+			# Loop infinito durante el power-up
+			if star.position.y > camera.position.y + 800:
+				star.position.y = camera.position.y - 800
+		elif _star_slow_factor > 0.01:
+			# Efecto de lentitud del hourglass: estiramiento más pequeño y más lento
+			var max_slow_stretch = 8.0 + depth * 4.0  # Menos estiramiento que el infinity
+			var current_slow_stretch = depth + (max_slow_stretch - depth) * _star_slow_factor
+			star.size.y = current_slow_stretch
+			
+			# Transición de color suave (violeta/morado)
+			var slow_color = Color(0.75, 0.35, 1.0, 1.0)  # Violeta
+			star.color = Color.WHITE.lerp(slow_color, _star_slow_factor)
+			
+			# Mover estrellas más lento durante el hourglass
+			var slow_multiplier = 1.0 - 0.4 * _star_slow_factor  # 1x a 0.6x velocidad
+			star.position.y += 30.0 * delta * (depth / 3.0) * slow_multiplier
+			
+			# Loop más lento durante el hourglass
+			if star.position.y > camera.position.y + 800:
+				star.position.y = camera.position.y - 800
+		else:
+			# Restaurar tamaño normal
+			star.size.y = depth
+			star.color = Color.WHITE
+
+func _toggle_fullscreen() -> void:
+	if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	else:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+
+func _on_viewport_size_changed() -> void:
+	var viewport_size = get_viewport().get_visible_rect().size
+	var offset_x = (viewport_size.x - 1152.0) / 2.0
+	camera.offset.x = -offset_x
+	$UI.offset.x = offset_x
