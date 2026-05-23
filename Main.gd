@@ -3,6 +3,8 @@ extends Node2D
 
 const PortraitFrame = preload("res://PortraitFrame.gd")
 
+var SCREEN_WIDTH = 1152.0
+var SCREEN_HEIGHT = 648.0
 const GRID_SIZE = 32
 const MAX_SAP = 150
 const SAP_COST_PER_SEGMENT = 3
@@ -53,6 +55,7 @@ var _seeking_bend_angle = 0.0
 var _seeking_delay_timer = 0.0
 var _tutorial_line: Line2D
 var _tutorial_cursor: TextureRect
+var _mobile_retract_btn: Button = null
 
 var in_menu = true
 var _menu_node: Control
@@ -116,6 +119,19 @@ var _star_stretch_factor: float = 0.0  # Factor de estiramiento actual (para tra
 var _star_slow_factor: float = 0.0  # Factor de lentitud para el hourglass
 
 func _ready():
+	var is_mobile = OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]
+	if is_mobile:
+		SCREEN_WIDTH = 648.0
+		SCREEN_HEIGHT = 1152.0
+		DisplayServer.screen_set_orientation(DisplayServer.SCREEN_PORTRAIT)
+		camera_speed = 24.0
+		target_camera_speed = 24.0
+	else:
+		SCREEN_WIDTH = 1152.0
+		SCREEN_HEIGHT = 648.0
+		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_WINDOWED:
+			DisplayServer.window_set_size(Vector2i(1152, 648))
+		
 	randomize()
 	
 	# Inicializar el indicador de combo de generación neón en la esquina superior derecha
@@ -161,8 +177,13 @@ func _ready():
 	add_child(_tutorial_cursor)
 	
 	# Centrar los recuadros originales para que no se desplacen raro al crecer
-	ancestor.position -= Vector2(GRID_SIZE, GRID_SIZE)
-	descendant.position -= Vector2(GRID_SIZE, GRID_SIZE)
+	var is_portrait = SCREEN_HEIGHT > SCREEN_WIDTH
+	if is_portrait:
+		ancestor.position = Vector2(96.0 - GRID_SIZE * 1.5, 600.0 - GRID_SIZE * 1.5)
+		descendant.position = Vector2(SCREEN_WIDTH - 96.0 - GRID_SIZE * 1.5, 600.0 - GRID_SIZE * 1.5)
+	else:
+		ancestor.position = Vector2(192.0 - GRID_SIZE * 1.5, 256.0 - GRID_SIZE * 1.5)
+		descendant.position = Vector2(896.0 - GRID_SIZE * 1.5, 256.0 - GRID_SIZE * 1.5)
 	_tutorial_cursor.position = (ancestor.position + ancestor.size / 2.0) - Vector2(18, 24)
 	
 	root_line.width = GRID_SIZE * 0.4
@@ -175,6 +196,7 @@ func _ready():
 	_setup_battery_ui()
 	_load_leaderboard_entries()
 	_setup_classification_area()
+	_setup_mobile_ui()
 	
 	# Instanciar el reproductor de música de fondo
 	_music_player = AudioStreamPlayer.new()
@@ -187,7 +209,7 @@ func _ready():
 	_play_music()
 	
 	# Posicionar la cámara en el menú inicial
-	camera.position = Vector2(0, -648)
+	camera.position = Vector2(0, -SCREEN_HEIGHT)
 	
 	# Configurar y levantar el menú principal
 	_setup_main_menu()
@@ -473,15 +495,11 @@ func _process(delta):
 			var new_partner = PortraitFrame.new()
 			new_partner.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
 			
-			var offset_cells_x = randi_range(10, 16)
-			var offset_cells_y = randi_range(-2, 4)
+			var offset_cells_x = randi_range(-2, 2)
+			var offset_cells_y = randi_range(12, 18)
 			
-			var target_x = 0
-			if child.position.x < 1152 / 2.0:
-				target_x = child.position.x + offset_cells_x * GRID_SIZE
-			else:
-				target_x = child.position.x - offset_cells_x * GRID_SIZE
-			target_x = clamp(target_x, GRID_SIZE * 4, 1152 - GRID_SIZE * 4)
+			var target_x = child.position.x + offset_cells_x * GRID_SIZE
+			target_x = clamp(target_x, GRID_SIZE * 4, SCREEN_WIDTH - GRID_SIZE * 4)
 			
 			var partner_grid_center = get_grid_pos(Vector2(target_x, final_pt.y + offset_cells_y * GRID_SIZE))
 			new_partner.position = partner_grid_center - Vector2(GRID_SIZE * 1.5, GRID_SIZE * 1.5)
@@ -538,7 +556,8 @@ func _process(delta):
 			root_line.points = current_path
 			
 			# Restaurar velocidad de cámara (con un pequeño incremento por nivel completado)
-			target_camera_speed = pre_powerup_camera_speed + 5.0
+			var speed_increment = 8.0 if (OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]) else 5.0
+			target_camera_speed = pre_powerup_camera_speed + speed_increment
 			camera_speed = target_camera_speed
 			
 			# Limpieza de memoria de obstáculos/recompensas/retratos antiguos lejanos
@@ -712,7 +731,7 @@ func _process(delta):
 	# Si la pareja sigue en pantalla, el jugador SIEMPRE tiene la oportunidad de salvarse (usando el click derecho para retraer la raíz si se quedó atascada arriba).
 	var destination_lost = (descendant.position.y + descendant.size.y) < limit_y
 	
-	if destination_lost and not game_over and not infinity_powerup_active:
+	if destination_lost and not game_over and not infinity_powerup_active and not in_menu:
 		trigger_game_over(false, true)
 			
 	# Redibujar la cuadrícula en cada frame para que acompañe a la cámara
@@ -916,22 +935,23 @@ func retract_root():
 
 func _draw():
 	# Dibujar la cuadrícula solo en el área visible de la cámara
+	var viewport_size = get_viewport().get_visible_rect().size
 	var start_y = int(camera.position.y / GRID_SIZE) * GRID_SIZE
-	var end_y = start_y + 648 + GRID_SIZE * 2
+	var end_y = start_y + viewport_size.y + GRID_SIZE * 4
 	
 	# Extender la cuadrícula más abajo durante el modo infinito para que no se vea vacío
 	if infinity_powerup_active:
-		end_y += 400  # Extender 400px más abajo durante el infinito
+		end_y += 1600  # Extender 1600px más abajo durante el infinito
 	
 	var grid_color = Color(1, 1, 1, 0.05) # Muy sutil
 	
 	# Líneas verticales
-	for x in range(0, 1152 + GRID_SIZE, GRID_SIZE):
+	for x in range(0, int(viewport_size.x) + GRID_SIZE, GRID_SIZE):
 		draw_line(Vector2(x, start_y), Vector2(x, end_y), grid_color, 1.0)
 		
 	# Líneas horizontales
 	for y in range(start_y, end_y, GRID_SIZE):
-		draw_line(Vector2(0, y), Vector2(1152, y), grid_color, 1.0)
+		draw_line(Vector2(0, y), Vector2(viewport_size.x, y), grid_color, 1.0)
 
 func _input(event):
 	if event is InputEventKey and event.pressed and event.keycode == KEY_F11:
@@ -1225,7 +1245,7 @@ func generate_infinity_content(from_y: float, to_y: float):
 	
 	# Instanciar astar temporal para verificar accesibilidad
 	var astar = AStarGrid2D.new()
-	var max_grid_x = floor(1152 / GRID_SIZE)
+	var max_grid_x = floor(SCREEN_WIDTH / GRID_SIZE)
 	astar.region = Rect2i(0, start_y_grid, max_grid_x, end_y_grid - start_y_grid + 1)
 	astar.cell_size = Vector2(GRID_SIZE, GRID_SIZE)
 	astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
@@ -1459,7 +1479,7 @@ func try_add_single_point(grid_pos: Vector2) -> bool:
 				
 				# Generar el camino de descenso automático — diagonal directa al centro, luego recto
 				var start_cell = get_grid_coord(start_pt)
-				var cx = 18  # columna central
+				var cx = int(SCREEN_WIDTH / 2.0 / GRID_SIZE)  # columna central
 				var h_dist = abs(start_cell.x - cx)  # cuántas celdas hay que cruzar horizontalmente
 				var diag_end_y = start_cell.y + h_dist  # la diagonal baja tanto como se mueve de lado
 				
@@ -1712,7 +1732,8 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 			if target_camera_speed > 0.0:
 				slow_ratio = camera_speed / target_camera_speed
 				
-			target_camera_speed += 5.0 # Acelerar la velocidad objetivo con cada victoria
+			var speed_increment = 8.0 if (OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]) else 5.0
+			target_camera_speed += speed_increment # Acelerar la velocidad objetivo con cada victoria
 			
 			# Mantener el efecto de tiempo lento de forma fluida en la nueva generación
 			camera_speed = target_camera_speed * slow_ratio
@@ -1746,13 +1767,13 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 				else:
 					score_lbl.text = "PUNTUACIÓN: " + str(final_score) + "\n(Puntos: " + str(green_squares_collected) + " × Gen: " + str(generation) + ")"
 				
-			# Posicionar por debajo de la cámara actual con holgura extra (+1200.0) para ocultar restos del gameplay
-			_classification_area.position = Vector2(0, camera.position.y + 1200.0)
+			# Posicionar por debajo de la cámara actual con holgura extra (+2400.0) para ocultar restos del gameplay
+			_classification_area.position = Vector2(0, camera.position.y + 2400.0)
 			_classification_area.modulate.a = 0.0
 			_classification_area.show()
 			
 			var t = create_tween().set_parallel(true)
-			t.tween_property(camera, "position", Vector2(0.0, camera.position.y + 1200.0), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+			t.tween_property(camera, "position", Vector2(0.0, camera.position.y + 2400.0), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 			t.tween_property(_classification_area, "modulate:a", 1.0, 1.2).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 			
 			# Animar el desvanecimiento elegante de la UI de juego para que no flote en la clasificación
@@ -1768,6 +1789,9 @@ func trigger_game_over(win: bool, out_of_bounds: bool = false):
 			if _green_score_label:
 				t.tween_property(_green_score_label, "scale", Vector2.ZERO, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
 				t.tween_property(_green_score_label, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			if _mobile_retract_btn:
+				t.tween_property(_mobile_retract_btn, "scale", Vector2.ZERO, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+				t.tween_property(_mobile_retract_btn, "modulate:a", 0.0, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 func generate_procedural_generation_content(child: PortraitFrame, new_partner: PortraitFrame, child_grid_center: Vector2, partner_grid_center: Vector2, line_clear_rect: Rect2) -> void:
 	print("[GEN_PROC] Start")
@@ -1804,7 +1828,7 @@ func generate_procedural_generation_content(child: PortraitFrame, new_partner: P
 	var astar = AStarGrid2D.new()
 	var top_y = min(child_coord.y, partner_coord.y) - 4
 	var bottom_y = max(child_coord.y, partner_coord.y) + 6
-	var max_grid_x = floor(1152 / GRID_SIZE)
+	var max_grid_x = floor(SCREEN_WIDTH / GRID_SIZE)
 	astar.region = Rect2i(0, top_y, max_grid_x, bottom_y - top_y)
 	astar.cell_size = Vector2(GRID_SIZE, GRID_SIZE)
 	astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
@@ -2176,23 +2200,40 @@ func start_next_generation():
 	
 	# --- CÁLCULO DE branch_point Y child_grid_center AL INICIO ---
 	var current_y = descendant.position.y
-	var mid_x = (ancestor.position.x + descendant.position.x) / 2.0
 	
-	# Encontrar el punto de la ruta más cercano al CENTRO HORIZONTAL entre los padres.
+	# Encontrar el punto de la ruta más cercano al centro (horizontal o vertical según la disposición)
 	var branch_point = current_path[0]
 	var min_dist_to_center = 999999.0
 	var local_max_y = -999999.0
 	
-	for p in current_path:
-		var dist = abs(p.x - mid_x)
-		if dist < min_dist_to_center - 10: # Mejorar si se acerca significativamente al centro
-			min_dist_to_center = dist
-			local_max_y = p.y
-			branch_point = p
-		elif abs(dist - min_dist_to_center) <= 10: # Si está igual de centrado, preferir el más profundo
-			if p.y > local_max_y:
+	var dx = abs(ancestor.position.x - descendant.position.x)
+	var dy = abs(ancestor.position.y - descendant.position.y)
+	var is_vertical_layout = dy > dx
+	
+	if is_vertical_layout:
+		var mid_y = (ancestor.position.y + descendant.position.y) / 2.0
+		for p in current_path:
+			var dist = abs(p.y - mid_y)
+			if dist < min_dist_to_center - 10: # Tolerancia de media celda
+				min_dist_to_center = dist
+				branch_point = p
+			elif abs(dist - min_dist_to_center) <= 10:
+				# Desempate: preferir el más centrado en X
+				var mid_x = (ancestor.position.x + descendant.position.x) / 2.0
+				if abs(p.x - mid_x) < abs(branch_point.x - mid_x):
+					branch_point = p
+	else:
+		var mid_x = (ancestor.position.x + descendant.position.x) / 2.0
+		for p in current_path:
+			var dist = abs(p.x - mid_x)
+			if dist < min_dist_to_center - 10:
+				min_dist_to_center = dist
 				local_max_y = p.y
 				branch_point = p
+			elif abs(dist - min_dist_to_center) <= 10:
+				if p.y > local_max_y:
+					local_max_y = p.y
+					branch_point = p
 				
 	# Encontrar la profundidad MÁXIMA ABSOLUTA de toda la ruta para el nuevo hijo
 	var absolute_max_y = current_path[0].y
@@ -2277,15 +2318,91 @@ func start_next_generation():
 	add_child(child)
 	tween.tween_property(child, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	
+	# Determinar el camino de bajada
+	var chosen_path: Array[Vector2] = []
+	if is_vertical_layout:
+		# Usamos AStarGrid2D para un flanqueo ortogonal amplio y limpio
+		var astar = AStarGrid2D.new()
+		var start_coord = get_grid_coord(branch_point)
+		var end_coord = get_grid_coord(child_grid_center)
+		
+		# Definir la región para el AStar.
+		# Queremos que la región cubra el ancho de la pantalla y el alto desde branch_point a child_grid_center con un margen.
+		var max_grid_x = int(SCREEN_WIDTH / GRID_SIZE)
+		var start_y_grid = min(start_coord.y, end_coord.y) - 3
+		var end_y_grid = max(start_coord.y, end_coord.y) + 3
+		
+		astar.region = Rect2i(0, start_y_grid, max_grid_x, end_y_grid - start_y_grid + 1)
+		astar.cell_size = Vector2(GRID_SIZE, GRID_SIZE)
+		astar.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_NEVER
+		astar.update()
+		
+		# 1. Hacer sólidas las celdas ocupadas por el retrato descendiente (padre inferior)
+		# Para asegurar un flanqueo amplio (no pegado), marcamos un rectángulo sólido
+		# de tamaño considerable (por ejemplo, 7 celdas de ancho por 5 celdas de alto) centrado en el descendiente.
+		var desc_coord = get_grid_coord(descendant.position + descendant.size / 2.0)
+		for x in range(desc_coord.x - 3, desc_coord.x + 4):
+			for y in range(desc_coord.y - 2, desc_coord.y + 3):
+				var cell = Vector2i(x, y)
+				if astar.region.has_point(cell):
+					astar.set_point_solid(cell, true)
+					
+		# 2. Hacer sólidos los puntos ya ocupados por hilos antiguos en esta región
+		for pos in all_previous_paths:
+			var coord = get_grid_coord(pos)
+			if astar.region.has_point(coord):
+				astar.set_point_solid(coord, true)
+				
+		# 3. Asegurar que inicio y fin no sean sólidos
+		astar.set_point_solid(start_coord, false)
+		astar.set_point_solid(end_coord, false)
+		
+		# Buscar el camino con AStar
+		var path_coords = astar.get_id_path(start_coord, end_coord)
+		if path_coords.size() > 0:
+			for coord in path_coords:
+				chosen_path.append(Vector2(coord.x * GRID_SIZE + GRID_SIZE / 2.0, coord.y * GRID_SIZE + GRID_SIZE / 2.0))
+		else:
+			# Respaldo de seguridad si AStar no encuentra camino: desvío manual amplio
+			var p_center = descendant.position + descendant.size / 2.0
+			var bypass_y_up = p_center.y - 2.0 * GRID_SIZE
+			var bypass_y_down = p_center.y + 2.0 * GRID_SIZE
+			var bypass_x_left = p_center.x - 2.5 * GRID_SIZE
+			var bypass_x_right = p_center.x + 2.5 * GRID_SIZE
+			var path_left_pts: Array[Vector2] = [
+				branch_point,
+				Vector2(p_center.x, bypass_y_up),
+				Vector2(bypass_x_left, bypass_y_up),
+				Vector2(bypass_x_left, bypass_y_down),
+				Vector2(p_center.x, bypass_y_down),
+				child_grid_center
+			]
+			var path_right_pts: Array[Vector2] = [
+				branch_point,
+				Vector2(p_center.x, bypass_y_up),
+				Vector2(bypass_x_right, bypass_y_up),
+				Vector2(bypass_x_right, bypass_y_down),
+				Vector2(p_center.x, bypass_y_down),
+				child_grid_center
+			]
+			var collisions_left = check_path_collisions(path_left_pts)
+			var collisions_right = check_path_collisions(path_right_pts)
+			if collisions_left <= collisions_right:
+				chosen_path = path_left_pts
+			else:
+				chosen_path = path_right_pts
+	else:
+		chosen_path = [branch_point, child_grid_center]
+
 	var descent_line = Line2D.new()
 	descent_line.width = GRID_SIZE * 0.4
 	descent_line.default_color = Color(1, 0.9, 0, 1) # Nace brillante
-	descent_line.add_point(branch_point)
-	descent_line.add_point(child_grid_center)
+	for pt in chosen_path:
+		descent_line.add_point(pt)
 	roots_container.add_child(descent_line)
 	
 	# 2. Enroscar hélice en la línea de bajada también
-	var descent_helix = create_wrapping_helix([branch_point, child_grid_center])
+	var descent_helix = create_wrapping_helix(chosen_path)
 	roots_container.add_child(descent_helix)
 	
 	var descent_full_points = descent_helix.points
@@ -2293,7 +2410,7 @@ func start_next_generation():
 	
 	tween.tween_property(descent_line, "default_color", Color(0.5, 0.45, 0.0, 0.6), 1.0)
 	
-	# Fase 2: Animar el crecimiento progresivo de la hélice vertical (desde el branch_point hacia el hijo) tras el encuentro (delay 1.0s)
+	# Animar hélice
 	var v_dur = 1.0
 	var v_delay = 1.0
 	if descent_full_points.size() > 0:
@@ -2302,33 +2419,20 @@ func start_next_generation():
 			descent_helix.points = descent_full_points.slice(0, count)
 		, 0.0, 1.0, v_dur).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT).set_delay(v_delay)
 		
-	# Hacer crecer los pinchitos/espinas físicas en el camino vertical descendente
-	spawn_growing_thorns([branch_point, child_grid_center], v_delay, v_dur)
+	# Espinas
+	spawn_growing_thorns(chosen_path, v_delay, v_dur)
 	
-	# Añadir la línea vertical al historial de colisiones antiguas y destruir obstáculos en su camino
-	var start_y_grid = int(branch_point.y / GRID_SIZE)
-	var end_y_grid = int(child_grid_center.y / GRID_SIZE)
-	var branch_x_grid = int(branch_point.x / GRID_SIZE)
-	
-	# Hacemos que la línea vertical sea sólida hasta el borde superior del retrato (end_y_grid - 1)
-	# Esto evita que se crucen o solapen raíces antiguas directamente sobre el marco del personaje.
-	for y in range(start_y_grid, end_y_grid - 1):
-		var pos = get_grid_pos(Vector2(branch_x_grid * GRID_SIZE, y * GRID_SIZE))
-		all_previous_paths.append(pos)
-		_occupied_previous_points[pos] = true
+	# Registrar camino
+	register_path_in_grid(chosen_path)
 	# Instanciar a la nueva Pareja (ya no en la misma línea estricta)
 	var new_partner = PortraitFrame.new()
 	new_partner.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
 	
-	var offset_cells_x = randi_range(10, 16)
-	var offset_cells_y = randi_range(-2, 4) # La pareja puede estar un poco más arriba o más abajo que el hijo
+	var offset_cells_x = randi_range(-2, 2)
+	var offset_cells_y = randi_range(12, 18) # La pareja estará más abajo que el hijo
 	
-	var target_x = 0
-	if child.position.x < 1152 / 2.0:
-		target_x = child.position.x + offset_cells_x * GRID_SIZE
-	else:
-		target_x = child.position.x - offset_cells_x * GRID_SIZE
-	target_x = clamp(target_x, GRID_SIZE * 4, 1152 - GRID_SIZE * 4) # Mayor margen en bordes para el 3x3
+	var target_x = child.position.x + offset_cells_x * GRID_SIZE
+	target_x = clamp(target_x, GRID_SIZE * 4, SCREEN_WIDTH - GRID_SIZE * 4) # Mayor margen en bordes para el 3x3
 	
 	var partner_grid_center = get_grid_pos(Vector2(target_x, child_grid_center.y + offset_cells_y * GRID_SIZE))
 	new_partner.position = partner_grid_center - Vector2(GRID_SIZE * 1.5, GRID_SIZE * 1.5)
@@ -2345,11 +2449,19 @@ func start_next_generation():
 	add_child(new_partner)
 	tween.tween_property(new_partner, "scale", Vector2.ONE, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	
-	# --- NUEVA LÓGICA DE LIMPIEZA TOTAL Y GENERACIÓN PROCEDURAL ---
-	# 1. El camino de la línea vertical entera (con margen ancho)
+	var min_x = chosen_path[0].x
+	var max_x = chosen_path[0].x
+	var min_y = chosen_path[0].y
+	var max_y = chosen_path[0].y
+	for pt in chosen_path:
+		if pt.x < min_x: min_x = pt.x
+		if pt.x > max_x: max_x = pt.x
+		if pt.y < min_y: min_y = pt.y
+		if pt.y > max_y: max_y = pt.y
+	
 	var line_clear_rect = Rect2(
-		Vector2(branch_point.x - GRID_SIZE, branch_point.y),
-		Vector2(GRID_SIZE * 2, child_grid_center.y - branch_point.y + GRID_SIZE)
+		Vector2(min_x - GRID_SIZE, min_y),
+		Vector2(max_x - min_x + GRID_SIZE * 2, max_y - min_y + GRID_SIZE)
 	)
 	
 	generate_procedural_generation_content(child, new_partner, child_grid_center, partner_grid_center, line_clear_rect)
@@ -2582,8 +2694,8 @@ func _setup_main_menu():
 	# Le damos el doble de ancho (2304px) para contener ambos menús uno al lado del otro
 	_menu_node = Control.new()
 	_menu_node.name = "MainMenu"
-	_menu_node.size = Vector2(2304, 648)
-	_menu_node.position = Vector2(0, -648)
+	_menu_node.size = Vector2(SCREEN_WIDTH * 2, SCREEN_HEIGHT)
+	_menu_node.position = Vector2(0, -SCREEN_HEIGHT)
 	add_child(_menu_node)
 	
 	# Inicializar la fuente del sistema limpia, elegante y moderna (compartida entre idioma y render)
@@ -2603,7 +2715,7 @@ func _setup_main_menu():
 	_menu_node.add_child(menu_en)
 	
 	# Instanciar el menú en español a x = 1152
-	var menu_es = _create_menu_half("es", 1152.0)
+	var menu_es = _create_menu_half("es", SCREEN_WIDTH)
 	_menu_node.add_child(menu_es)
 	
 	# Cargar panel de clasificación oculto
@@ -2612,20 +2724,22 @@ func _setup_main_menu():
 func _create_menu_half(lang: String, x_offset: float) -> Control:
 	var half = Control.new()
 	half.name = "Menu_" + lang
-	half.size = Vector2(1152, 648)
+	half.size = Vector2(SCREEN_WIDTH, SCREEN_HEIGHT)
 	half.position = Vector2(x_offset, 0)
+	
+	var is_portrait = SCREEN_HEIGHT > SCREEN_WIDTH
 	
 	# Contenedores para el Título del juego de Alta Costura por caracteres
 	var title_lbl = Control.new()
 	title_lbl.name = "MenuTitle"
-	title_lbl.size = Vector2(1152, 180)
+	title_lbl.size = Vector2(SCREEN_WIDTH, 180)
 	title_lbl.position = Vector2(0, 90)
 	title_lbl.clip_contents = false
 	title_lbl.z_index = 2
 	
 	var title_shadow = Control.new()
 	title_shadow.name = "MenuTitleShadow"
-	title_shadow.size = Vector2(1152, 180)
+	title_shadow.size = Vector2(SCREEN_WIDTH, 180)
 	title_shadow.position = Vector2(0, 90)
 	title_shadow.clip_contents = false
 	title_shadow.z_index = 1
@@ -2634,40 +2748,45 @@ func _create_menu_half(lang: String, x_offset: float) -> Control:
 	half.add_child(title_lbl)
 	
 	# Reconstruir títulos
+	var title_size_en = 28 if is_portrait else 48
+	var title_size_es = 32 if is_portrait else 52
 	if lang == "en":
-		_rebuild_character_title(title_lbl, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, 48, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
-		_rebuild_character_title(title_shadow, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, 48, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
+		_rebuild_character_title(title_lbl, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, title_size_en, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
+		_rebuild_character_title(title_shadow, "I WAS WHAT YOU ARE\nAND YOU SHALL BE WHAT I AM", _title_font, title_size_en, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
 	else:
-		_rebuild_character_title(title_lbl, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, 52, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
-		_rebuild_character_title(title_shadow, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, 52, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
+		_rebuild_character_title(title_lbl, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, title_size_es, Color(1.0, 0.85, 0.15, 1.0), Color(0, 0, 0, 1), 12)
+		_rebuild_character_title(title_shadow, "FUI LO QUE ERES\nY SERÁS LO QUE SOY", _title_font, title_size_es, Color(1.0, 0.8, 0.1, 0.9), Color(0.8, 0.4, 0.0, 0.5), 14)
 		
 	# Botones: Jugar y Clasificación
 	var play_btn = Button.new()
 	play_btn.name = "PlayButton"
 	half.add_child(play_btn)
 	_style_menu_button(play_btn, "PLAY" if lang == "en" else "JUGAR")
-	play_btn.position = Vector2((1152 - 280) / 2, 300)
+	var play_btn_y = 450 if is_portrait else 300
+	play_btn.position = Vector2((SCREEN_WIDTH - 280) / 2, play_btn_y)
 	play_btn.pressed.connect(_on_play_pressed)
 	
 	var leader_btn = Button.new()
 	leader_btn.name = "LeaderboardButton"
 	half.add_child(leader_btn)
 	_style_menu_button(leader_btn, "LEADERBOARDS" if lang == "en" else "CLASIFICACIÓN")
-	leader_btn.position = Vector2((1152 - 280) / 2, 390)
+	var leader_btn_y = 540 if is_portrait else 390
+	leader_btn.position = Vector2((SCREEN_WIDTH - 280) / 2, leader_btn_y)
 	leader_btn.pressed.connect(_on_leaderboard_pressed)
 	
-	if OS.get_name() != "Web":
+	if OS.get_name() not in ["Web", "Android", "iOS"]:
 		var exit_btn = Button.new()
 		exit_btn.name = "ExitButton"
 		half.add_child(exit_btn)
 		_style_menu_button(exit_btn, "EXIT" if lang == "en" else "SALIR")
-		exit_btn.position = Vector2((1152 - 280) / 2, 480)
+		var exit_btn_y = 630 if is_portrait else 480
+		exit_btn.position = Vector2((SCREEN_WIDTH - 280) / 2, exit_btn_y)
 		exit_btn.pressed.connect(func(): get_tree().quit())
 	
 	# Contenedor de selección de idioma (Banderas en la esquina superior derecha)
 	var lang_selector = HBoxContainer.new()
 	lang_selector.name = "LangSelector"
-	lang_selector.position = Vector2(1152 - 116, 24)
+	lang_selector.position = Vector2(SCREEN_WIDTH - 116, 24)
 	lang_selector.size = Vector2(92, 44)
 	lang_selector.add_theme_constant_override("separation", 12)
 	half.add_child(lang_selector)
@@ -2714,7 +2833,7 @@ func _on_language_flag_pressed(lang_code: String):
 	_set_language(lang_code)
 	
 	# Transición lateral suave del contenedor de menú en lugar del eje X de la cámara
-	var target_x = 0.0 if lang_code == "en" else -1152.0
+	var target_x = 0.0 if lang_code == "en" else -SCREEN_WIDTH
 	var t = create_tween()
 	t.tween_property(_menu_node, "position:x", target_x, 1.2).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 
@@ -2832,6 +2951,10 @@ func _set_language(lang_code: String):
 			
 	# 3. Actualizar los marcadores de la partida activa
 	update_ui()
+	
+	# 4. Actualizar texto del botón mobile retract
+	if _mobile_retract_btn:
+		_mobile_retract_btn.text = "UNDO" if current_language == "en" else "DESHACER"
 
 func _rebuild_character_title(container: Control, text: String, font: Font, font_size: int, font_color: Color, outline_color: Color, outline_size: int):
 	# Limpiar hijos viejos de forma segura
@@ -2900,6 +3023,10 @@ func _on_play_pressed():
 	in_menu = false
 	ancestor.show()
 	descendant.show()
+	if _mobile_retract_btn:
+		_mobile_retract_btn.scale = Vector2.ONE
+		_mobile_retract_btn.modulate.a = 1.0
+		_mobile_retract_btn.show()
 	
 	if roots_container:
 		roots_container.show()
@@ -2908,11 +3035,18 @@ func _on_play_pressed():
 	if rewards_container:
 		rewards_container.show()
 	
+	var is_portrait = SCREEN_HEIGHT > SCREEN_WIDTH
+	var is_mobile = OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]
+	
 	if not _mechanics_tutorial_panel:
 		_mechanics_tutorial_panel = Panel.new()
 		_mechanics_tutorial_panel.name = "MechanicsTutorialPanel"
-		_mechanics_tutorial_panel.size = Vector2(920, 154) # Altura reducida de 180 a 154
-		_mechanics_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 18) # ABOVE the portraits!
+		if is_portrait:
+			_mechanics_tutorial_panel.size = Vector2(560, 300)
+			_mechanics_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 280, current_game_y_offset + 40)
+		else:
+			_mechanics_tutorial_panel.size = Vector2(920, 154)
+			_mechanics_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 460, current_game_y_offset + 18)
 		
 		var style = StyleBoxFlat.new()
 		style.bg_color = Color(0.04, 0.04, 0.06, 0.85) # Glassmorphism oscuro
@@ -2940,8 +3074,8 @@ func _on_play_pressed():
 			"icon_path": "res://assets/icon_mouse.png",
 			"title_en": "1. CONNECT",
 			"title_es": "1. CONECTAR",
-			"desc_en": "L-Click & Drag: Connect\nHold R-Click: Retract",
-			"desc_es": "Click Izq. y Arrastra: Conectar\nMantén Click Der: Retraer",
+			"desc_en": "Touch & Drag: Connect\nHold UNDO: Retract" if is_mobile else "L-Click & Drag: Connect\nHold R-Click: Retract",
+			"desc_es": "Toca y Arrastra: Conectar\nMantén DESHACER: Retraer" if is_mobile else "Click Izq. y Arrastra: Conectar\nMantén Click Der: Retraer",
 			"color": Color(0.3, 0.8, 1.0), # Celeste neón
 			"desc_font_size": 13
 		},
@@ -2978,8 +3112,15 @@ func _on_play_pressed():
 		var data = cols_data[i]
 		
 		var card = Panel.new()
-		card.size = Vector2(210, 134) # Aumentado de 122 a 134 para darle espacio de respiración vertical
-		card.position = Vector2(16 + 224 * i, 10) # Centrado verticalmente de forma perfecta dentro del panel de 154
+		var card_w = 250 if is_portrait else 210
+		if is_portrait:
+			card.size = Vector2(250, 134)
+			var col = i % 2
+			var row = i / 2
+			card.position = Vector2(20 + 270 * col, 10 + 144 * row)
+		else:
+			card.size = Vector2(210, 134)
+			card.position = Vector2(16 + 224 * i, 10)
 		
 		var card_style = StyleBoxFlat.new()
 		card_style.bg_color = Color(0.06, 0.06, 0.08, 0.95) # Contraste oscuro premium
@@ -3001,15 +3142,15 @@ func _on_play_pressed():
 		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		icon_rect.custom_minimum_size = Vector2(32, 32)
 		icon_rect.size = Vector2(32, 32)
-		icon_rect.position = Vector2(210 / 2.0 - 16, 14) # Bajado de 8 a 14 para separar del borde superior
+		icon_rect.position = Vector2(card_w / 2.0 - 16, 14) # Centrado horizontalmente
 		card.add_child(icon_rect)
 		
 		var title_lbl = Label.new()
 		title_lbl.text = data["title_en"] if current_language == "en" else data["title_es"]
 		title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		title_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		title_lbl.size = Vector2(210, 20)
-		title_lbl.position = Vector2(0, 52) # Bajado de 46 a 52
+		title_lbl.size = Vector2(card_w, 20)
+		title_lbl.position = Vector2(0, 52)
 		if _title_font:
 			title_lbl.add_theme_font_override("font", _title_font)
 		title_lbl.add_theme_font_size_override("font_size", 13) # Título más grande y arcade
@@ -3020,8 +3161,9 @@ func _on_play_pressed():
 		
 		var desc_lbl = Label.new()
 		desc_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		desc_lbl.custom_minimum_size = Vector2(190, 52)
-		desc_lbl.size = Vector2(190, 52)
+		var desc_w = 230 if is_portrait else 190
+		desc_lbl.custom_minimum_size = Vector2(desc_w, 52)
+		desc_lbl.size = Vector2(desc_w, 52)
 		desc_lbl.text = data["desc_en"] if current_language == "en" else data["desc_es"]
 		desc_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		desc_lbl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
@@ -3049,12 +3191,15 @@ func _on_play_pressed():
 		desc_lbl.add_theme_constant_override("outline_size", 4) # Contorno limpio y nítido
 		card.add_child(desc_lbl)
 		
-	# === SEGUNDO PANEL DEL TUTORIAL (🔋 SAVIA Y DESHACER) ===
 	if not _sap_tutorial_panel:
 		_sap_tutorial_panel = Panel.new()
 		_sap_tutorial_panel.name = "SapTutorialPanel"
-		_sap_tutorial_panel.size = Vector2(920, 136) # Altura incrementada de 120 a 136
-		_sap_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 412) # Posicionado más abajo con margen perfecto
+		if is_portrait:
+			_sap_tutorial_panel.size = Vector2(560, 156)
+			_sap_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 280, current_game_y_offset + 900)
+		else:
+			_sap_tutorial_panel.size = Vector2(920, 136)
+			_sap_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 460, current_game_y_offset + 412)
 		
 		var style = StyleBoxFlat.new()
 		style.bg_color = Color(0.04, 0.04, 0.06, 0.85) # Glassmorphism oscuro
@@ -3086,8 +3231,8 @@ func _on_play_pressed():
 		{
 			"title_en": "RETRACTION PENALTY",
 			"title_es": "PENALIZACIÓN",
-			"desc_en": "Right-Click retracts paths\nbut only refunds\n33% of the energy cost (1/3)",
-			"desc_es": "El click derecho retrae\ncaminos, pero solo devuelve\nel 33% de la energía (1/3)",
+			"desc_en": "Holding UNDO retracts paths\nbut only refunds\n33% of the energy cost (1/3)" if is_mobile else "Right-Click retracts paths\nbut only refunds\n33% of the energy cost (1/3)",
+			"desc_es": "Mantener DESHACER retrae\ncaminos, pero solo devuelve\nel 33% de la energía (1/3)" if is_mobile else "El click derecho retrae\ncaminos, pero solo devuelve\nel 33% de la energía (1/3)",
 			"color": Color(1.0, 0.4, 0.4) # Rojo peligro
 		},
 		{
@@ -3103,8 +3248,13 @@ func _on_play_pressed():
 		var data = sap_cols[i]
 		
 		var card = Panel.new()
-		card.size = Vector2(284, 104) # Altura de 104, ancho de 284
-		card.position = Vector2(17 + 301 * i, 16)
+		var card_w = 165 if is_portrait else 284
+		if is_portrait:
+			card.size = Vector2(165, 124)
+			card.position = Vector2(16 + 182 * i, 16)
+		else:
+			card.size = Vector2(284, 104)
+			card.position = Vector2(17 + 301 * i, 16)
 		
 		var card_style = StyleBoxFlat.new()
 		card_style.bg_color = Color(0.06, 0.06, 0.08, 0.95)
@@ -3126,8 +3276,9 @@ func _on_play_pressed():
 			title_lbl.text = data["title_en"] if current_language == "en" else data["title_es"]
 			title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			title_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			title_lbl.size = Vector2(260, 24)
-			title_lbl.position = Vector2(12, 10)
+			var title_w = card_w - 20
+			title_lbl.size = Vector2(title_w, 24)
+			title_lbl.position = Vector2(10, 10)
 			if _title_font:
 				title_lbl.add_theme_font_override("font", _title_font)
 			title_lbl.add_theme_font_size_override("font_size", 12)
@@ -3150,21 +3301,31 @@ func _on_play_pressed():
 			card.add_child(desc_lbl)
 			
 			if i == 0:
-				desc_lbl.position = Vector2(12, 32)
-				desc_lbl.custom_minimum_size = Vector2(260, 42)
-				desc_lbl.size = Vector2(260, 42)
+				desc_lbl.position = Vector2(10, 32)
+				if is_portrait:
+					desc_lbl.custom_minimum_size = Vector2(title_w, 54)
+					desc_lbl.size = Vector2(title_w, 54)
+				else:
+					desc_lbl.custom_minimum_size = Vector2(title_w, 42)
+					desc_lbl.size = Vector2(title_w, 42)
 				
 				var preview_bat = Control.new()
 				preview_bat.name = "PreviewBatteryBar"
 				preview_bat.size = Vector2(240, 44)
-				preview_bat.position = Vector2(92, 74)
+				var bat_x = 32 if is_portrait else 92
+				var bat_y = 88 if is_portrait else 74
+				preview_bat.position = Vector2(bat_x, bat_y)
 				preview_bat.scale = Vector2(0.42, 0.42)
 				preview_bat.draw.connect(_draw_preview_battery_bar.bind(preview_bat))
 				card.add_child(preview_bat)
 			elif i == 1:
-				desc_lbl.position = Vector2(12, 32)
-				desc_lbl.custom_minimum_size = Vector2(260, 60)
-				desc_lbl.size = Vector2(260, 60)
+				desc_lbl.position = Vector2(10, 32)
+				if is_portrait:
+					desc_lbl.custom_minimum_size = Vector2(title_w, 80)
+					desc_lbl.size = Vector2(title_w, 80)
+				else:
+					desc_lbl.custom_minimum_size = Vector2(title_w, 60)
+					desc_lbl.size = Vector2(title_w, 60)
 		else:
 			# i == 2: Solo el símbolo de infinito grande y debajo "¿?"
 			var inf_icon = TextureRect.new()
@@ -3172,15 +3333,18 @@ func _on_play_pressed():
 			inf_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 			inf_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 			inf_icon.size = Vector2(40, 40)
-			inf_icon.position = Vector2((284 - 40) / 2.0, 16)
+			var inf_y = 24 if is_portrait else 16
+			inf_icon.position = Vector2((card_w - 40) / 2.0, inf_y)
 			card.add_child(inf_icon)
 			
 			var q_lbl = Label.new()
 			q_lbl.text = "¿?"
 			q_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			q_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			q_lbl.size = Vector2(260, 24)
-			q_lbl.position = Vector2(12, 56)
+			var title_w = card_w - 20
+			q_lbl.size = Vector2(title_w, 24)
+			var q_y = 68 if is_portrait else 56
+			q_lbl.position = Vector2(10, q_y)
 			if _title_font:
 				q_lbl.add_theme_font_override("font", _title_font)
 			q_lbl.add_theme_font_size_override("font_size", 24)
@@ -3218,25 +3382,32 @@ func _on_play_pressed():
 func _on_leaderboard_pressed():
 	_update_leaderboard_content()
 	
-	# Colocar el panel exactamente una pantalla por debajo del menú actual y centrado verticalmente
+	# Colocar el panel exactamente dos pantallas por debajo del menú actual y centrado verticalmente
 	var menu_y = _menu_node.position.y
-	_leaderboard_panel.position = Vector2((1152 - 720) / 2, menu_y + 648.0 + 74.0)
+	var is_mobile = OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]
+	var panel_w = 580.0 if is_mobile else 560.0
+	_leaderboard_panel.position = Vector2((SCREEN_WIDTH - panel_w) / 2, menu_y + SCREEN_HEIGHT * 2.0 + (100.0 if is_mobile else 150.0))
 	_leaderboard_panel.show()
 	
-	# Posicionar y mostrar el botón circular de volver atrás (alineado a la izquierda del panel)
+	# Posicionar y mostrar el botón circular de volver atrás
 	if _leaderboard_back_btn:
-		_leaderboard_back_btn.position = Vector2(216 - 52 - 16, menu_y + 648.0 + 74.0)
+		var back_x = 24.0 if is_mobile else 40.0
+		var back_y = menu_y + SCREEN_HEIGHT * 2.0 + (32.0 if is_mobile else 48.0)
+		_leaderboard_back_btn.position = Vector2(back_x, back_y)
 		_leaderboard_back_btn.show()
 	
 	var tween = create_tween()
-	tween.tween_property(camera, "position", Vector2(0.0, menu_y + 648.0), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(camera, "position", Vector2(0.0, menu_y + SCREEN_HEIGHT * 2.0), 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN_OUT)
 
 func _setup_leaderboard_panel():
 	_leaderboard_panel = PanelContainer.new()
 	_leaderboard_panel.name = "LeaderboardPanel"
-	_leaderboard_panel.custom_minimum_size = Vector2(720, 500)
-	_leaderboard_panel.size = Vector2(720, 500)
-	_leaderboard_panel.position = Vector2((1152 - 720) / 2, 74)
+	var is_mobile = OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]
+	var panel_w = 580.0 if is_mobile else 560.0
+	var panel_h = 800.0 if is_mobile else 750.0
+	_leaderboard_panel.custom_minimum_size = Vector2(panel_w, panel_h)
+	_leaderboard_panel.size = Vector2(panel_w, panel_h)
+	_leaderboard_panel.position = Vector2((SCREEN_WIDTH - panel_w) / 2, 100)
 	add_child(_leaderboard_panel) # Agregar a self para que se dibuje en el espacio del mundo 2D
 	_leaderboard_panel.hide() # Inicialmente oculto
 	
@@ -3261,9 +3432,10 @@ func _setup_leaderboard_panel():
 	_leaderboard_back_btn.icon = load("res://assets/icon_back_arrow.png")
 	_leaderboard_back_btn.expand_icon = true
 	_leaderboard_back_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_leaderboard_back_btn.custom_minimum_size = Vector2(52, 52)
+	var btn_size = 64.0 if is_mobile else 52.0
+	_leaderboard_back_btn.custom_minimum_size = Vector2(btn_size, btn_size)
 	_leaderboard_back_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	_leaderboard_back_btn.pivot_offset = Vector2(26, 26)
+	_leaderboard_back_btn.pivot_offset = Vector2(btn_size / 2.0, btn_size / 2.0)
 	
 	var back_normal = StyleBoxFlat.new()
 	back_normal.bg_color = Color(0.08, 0.08, 0.08, 0.96)
@@ -3272,10 +3444,10 @@ func _setup_leaderboard_panel():
 	back_normal.border_width_right = 2
 	back_normal.border_width_bottom = 2
 	back_normal.border_color = Color(0.8, 0.65, 0.1, 1) # Borde dorado a juego con el panel
-	back_normal.corner_radius_top_left = 26
-	back_normal.corner_radius_top_right = 26
-	back_normal.corner_radius_bottom_left = 26
-	back_normal.corner_radius_bottom_right = 26
+	back_normal.corner_radius_top_left = btn_size / 2.0
+	back_normal.corner_radius_top_right = btn_size / 2.0
+	back_normal.corner_radius_bottom_left = btn_size / 2.0
+	back_normal.corner_radius_bottom_right = btn_size / 2.0
 	
 	var back_hover = StyleBoxFlat.new()
 	back_hover.bg_color = Color(0.14, 0.12, 0.08, 0.98)
@@ -3284,10 +3456,10 @@ func _setup_leaderboard_panel():
 	back_hover.border_width_right = 2
 	back_hover.border_width_bottom = 2
 	back_hover.border_color = Color(0.95, 0.8, 0.25, 1) # Dorado brillante en hover
-	back_hover.corner_radius_top_left = 26
-	back_hover.corner_radius_top_right = 26
-	back_hover.corner_radius_bottom_left = 26
-	back_hover.corner_radius_bottom_right = 26
+	back_hover.corner_radius_top_left = btn_size / 2.0
+	back_hover.corner_radius_top_right = btn_size / 2.0
+	back_hover.corner_radius_bottom_left = btn_size / 2.0
+	back_hover.corner_radius_bottom_right = btn_size / 2.0
 	
 	_leaderboard_back_btn.add_theme_stylebox_override("normal", back_normal)
 	_leaderboard_back_btn.add_theme_stylebox_override("hover", back_hover)
@@ -3341,6 +3513,8 @@ func _update_leaderboard_content():
 	header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	header.add_theme_font_size_override("font_size", 32)
 	header.add_theme_color_override("font_color", Color(1, 0.9, 0, 1))
+	if _title_font:
+		header.add_theme_font_override("font", _title_font)
 	vbox.add_child(header)
 	
 	# Separador
@@ -3360,14 +3534,14 @@ func _update_leaderboard_content():
 	status_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	status_lbl.add_theme_font_size_override("font_size", 22)
 	status_lbl.add_theme_color_override("font_color", Color(0.9, 0.8, 0.5, 0.8))
+	if _body_font:
+		status_lbl.add_theme_font_override("font", _body_font)
 	vbox.add_child(status_lbl)
 	
 	# Efecto de latido suave de carga
 	var t = create_tween().set_loops()
 	t.tween_property(status_lbl, "modulate:a", 0.3, 0.6).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	t.tween_property(status_lbl, "modulate:a", 0.9, 0.6).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
-	
-	# El botón de atrás es ahora un elemento circular e independiente, configurado en _setup_leaderboard_panel.
 	
 	# Realizar la petición GET asíncrona al VPS
 	_make_http_request(
@@ -3414,12 +3588,14 @@ func _update_leaderboard_content():
 				print("[LEADERBOARD DEBUG] Leaderboard query failed. Displaying error banner.")
 				
 				var error_lbl = Label.new()
-				error_lbl.text = "THE ORACLE DOES NOT RESPOND\n(CONNECTION FAILED)" if current_language == "en" else "EL ORÁCULO NO RESPONDE\n(CONEXIÓN FALLIDA)"
+				error_lbl.text = "oracle dont responde"
 				error_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 				error_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 				error_lbl.custom_minimum_size = Vector2(0, 200) # Centrar verticalmente en el panel
-				error_lbl.add_theme_font_size_override("font_size", 22)
+				error_lbl.add_theme_font_size_override("font_size", 32)
 				error_lbl.add_theme_color_override("font_color", Color(1.0, 0.25, 0.25, 1.0))
+				if _body_font:
+					error_lbl.add_theme_font_override("font", _body_font)
 				vbox.add_child(error_lbl)
 	)
 
@@ -3431,16 +3607,20 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	if scores.size() > 12:
 		scores.resize(12)
 	
+	var is_mobile = OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]
+	
 	# HBox para alojar la lista scrollable y los botones de navegación de la lista
 	var content_hbox = HBoxContainer.new()
-	content_hbox.add_theme_constant_override("separation", 24)
+	content_hbox.add_theme_constant_override("separation", 12 if is_mobile else 24)
 	content_hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(content_hbox)
 	
 	# ScrollContainer para la lista
 	var scroll_container = ScrollContainer.new()
 	scroll_container.name = "LeaderboardScroll"
-	scroll_container.custom_minimum_size = Vector2(560, 300)
+	var scroll_w = 440 if is_mobile else 560
+	var scroll_h = 420 if is_mobile else 300
+	scroll_container.custom_minimum_size = Vector2(scroll_w, scroll_h)
 	scroll_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll_container.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -3450,14 +3630,14 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	# VBox dentro del ScrollContainer para las puntuaciones
 	var list_vbox = VBoxContainer.new()
 	list_vbox.name = "LeaderboardListVBox"
-	list_vbox.add_theme_constant_override("separation", 12)
+	list_vbox.add_theme_constant_override("separation", 8 if is_mobile else 12)
 	list_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll_container.add_child(list_vbox)
 	
 	for i in range(len(scores)):
 		var item = scores[i]
 		var hbox = HBoxContainer.new()
-		hbox.add_theme_constant_override("separation", 20)
+		hbox.add_theme_constant_override("separation", 10 if is_mobile else 20)
 		hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		list_vbox.add_child(hbox)
 		
@@ -3488,54 +3668,58 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 			date_color = Color(0.55, 0.55, 0.55, 0.7) # Claramente visible pero secundario
 			score_color = Color(0.5, 0.5, 0.5, 1.0)
 
-		# 1. Columna de Posición: Ancho fijo de 40px
+		# 1. Columna de Posición: Ancho fijo de 32px (movil) o 40px (desktop)
 		var pos_lbl = Label.new()
 		pos_lbl.text = str(i + 1) + ". "
-		pos_lbl.custom_minimum_size = Vector2(40, 0)
+		var pos_w = 32 if is_mobile else 40
+		pos_lbl.custom_minimum_size = Vector2(pos_w, 0)
 		if _body_font:
 			pos_lbl.add_theme_font_override("font", _body_font)
-		pos_lbl.add_theme_font_size_override("font_size", 20)
+		pos_lbl.add_theme_font_size_override("font_size", 16 if is_mobile else 20)
 		pos_lbl.add_theme_color_override("font_color", pos_color)
 		hbox.add_child(pos_lbl)
 
-		# 2. Columna de Nombre: Ancho mínimo de 176px con expansión fill y recorte de texto largo
+		# 2. Columna de Nombre: Ancho mínimo de 130px (movil) o 176px (desktop)
 		var name_lbl = Label.new()
 		name_lbl.text = item["name"]
-		name_lbl.custom_minimum_size = Vector2(176, 0)
+		var name_w = 130 if is_mobile else 176
+		name_lbl.custom_minimum_size = Vector2(name_w, 0)
 		name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		name_lbl.clip_text = true
 		if _body_font:
 			name_lbl.add_theme_font_override("font", _body_font)
-		name_lbl.add_theme_font_size_override("font_size", 20)
+		name_lbl.add_theme_font_size_override("font_size", 16 if is_mobile else 20)
 		name_lbl.add_theme_color_override("font_color", name_color)
 		hbox.add_child(name_lbl)
 		
-		# 3. Columna de Fecha: Ancho fijo de 140px, centrado horizontalmente
+		# 3. Columna de Fecha: Ancho fijo de 100px (movil) o 140px (desktop)
 		var date_lbl = Label.new()
 		date_lbl.text = item.get("date", "17/05/2026")
-		date_lbl.custom_minimum_size = Vector2(140, 0)
+		var date_w = 100 if is_mobile else 140
+		date_lbl.custom_minimum_size = Vector2(date_w, 0)
 		date_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		if _body_font:
 			date_lbl.add_theme_font_override("font", _body_font)
-		date_lbl.add_theme_font_size_override("font_size", 16)
+		date_lbl.add_theme_font_size_override("font_size", 13 if is_mobile else 16)
 		date_lbl.add_theme_color_override("font_color", date_color)
 		hbox.add_child(date_lbl)
 		
-		# 4. Columna de Puntuación (Generación): Ancho de 100px, alineado a la derecha
+		# 4. Columna de Puntuación (Generación): Ancho de 70px (movil) o 100px (desktop)
 		var score_lbl = Label.new()
 		score_lbl.text = str(int(item["score"])) + " pts"
-		score_lbl.custom_minimum_size = Vector2(100, 0)
+		var score_w = 70 if is_mobile else 100
+		score_lbl.custom_minimum_size = Vector2(score_w, 0)
 		score_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		if _body_font:
 			score_lbl.add_theme_font_override("font", _body_font)
-		score_lbl.add_theme_font_size_override("font_size", 20)
+		score_lbl.add_theme_font_size_override("font_size", 16 if is_mobile else 20)
 		score_lbl.add_theme_color_override("font_color", score_color)
 		hbox.add_child(score_lbl)
 		
 	# VBox para los dos botones de navegación de la lista (Subir y Bajar la lista)
 	var nav_vbox = VBoxContainer.new()
 	nav_vbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	nav_vbox.add_theme_constant_override("separation", 16)
+	nav_vbox.add_theme_constant_override("separation", 24 if is_mobile else 16)
 	content_hbox.add_child(nav_vbox)
 	
 	# Botón SUBIR LISTA (▲ con icono PNG)
@@ -3544,9 +3728,10 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	list_up_btn.icon = load("res://assets/icon_arrow_up.png")
 	list_up_btn.expand_icon = true
 	list_up_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	list_up_btn.custom_minimum_size = Vector2(44, 44) # Circular perfecto
+	var nav_btn_sz = 56 if is_mobile else 44
+	list_up_btn.custom_minimum_size = Vector2(nav_btn_sz, nav_btn_sz)
 	list_up_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	list_up_btn.pivot_offset = Vector2(22, 22)
+	list_up_btn.pivot_offset = Vector2(nav_btn_sz / 2.0, nav_btn_sz / 2.0)
 	nav_vbox.add_child(list_up_btn)
 	
 	# Botón BAJAR LISTA (▼ con icono PNG)
@@ -3555,9 +3740,9 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	list_down_btn.icon = load("res://assets/icon_arrow_down.png")
 	list_down_btn.expand_icon = true
 	list_down_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	list_down_btn.custom_minimum_size = Vector2(44, 44) # Circular perfecto
+	list_down_btn.custom_minimum_size = Vector2(nav_btn_sz, nav_btn_sz)
 	list_down_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	list_down_btn.pivot_offset = Vector2(22, 22)
+	list_down_btn.pivot_offset = Vector2(nav_btn_sz / 2.0, nav_btn_sz / 2.0)
 	nav_vbox.add_child(list_down_btn)
 	
 	# Estilos premium para los botones de la lista (Circular radial neón)
@@ -3568,10 +3753,10 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	list_btn_normal.border_width_right = 2
 	list_btn_normal.border_width_bottom = 2
 	list_btn_normal.border_color = Color(0.7, 0.55, 0.15, 1)
-	list_btn_normal.corner_radius_top_left = 22
-	list_btn_normal.corner_radius_top_right = 22
-	list_btn_normal.corner_radius_bottom_left = 22
-	list_btn_normal.corner_radius_bottom_right = 22
+	list_btn_normal.corner_radius_top_left = nav_btn_sz / 2.0
+	list_btn_normal.corner_radius_top_right = nav_btn_sz / 2.0
+	list_btn_normal.corner_radius_bottom_left = nav_btn_sz / 2.0
+	list_btn_normal.corner_radius_bottom_right = nav_btn_sz / 2.0
 	
 	var list_btn_hover = StyleBoxFlat.new()
 	list_btn_hover.bg_color = Color(0.22, 0.18, 0.1, 1)
@@ -3580,10 +3765,10 @@ func _render_leaderboard_list(vbox: VBoxContainer, scores: Array):
 	list_btn_hover.border_width_right = 2
 	list_btn_hover.border_width_bottom = 2
 	list_btn_hover.border_color = Color(0.95, 0.8, 0.25, 1)
-	list_btn_hover.corner_radius_top_left = 22
-	list_btn_hover.corner_radius_top_right = 22
-	list_btn_hover.corner_radius_bottom_left = 22
-	list_btn_hover.corner_radius_bottom_right = 22
+	list_btn_hover.corner_radius_top_left = nav_btn_sz / 2.0
+	list_btn_hover.corner_radius_top_right = nav_btn_sz / 2.0
+	list_btn_hover.corner_radius_bottom_left = nav_btn_sz / 2.0
+	list_btn_hover.corner_radius_bottom_right = nav_btn_sz / 2.0
 	
 	for btn in [list_up_btn, list_down_btn]:
 		btn.add_theme_stylebox_override("normal", list_btn_normal)
@@ -3861,7 +4046,7 @@ func _setup_combo_ui():
 	_generation_combo.name = "GenerationCombo"
 	_generation_combo.text = "x" + str(generation) + "!"
 	_generation_combo.size = Vector2(160, 60)
-	_generation_combo.position = Vector2(1152 - 160 - 32, 28) # Margen de 32px (simétrico al de la batería)
+	_generation_combo.position = Vector2(SCREEN_WIDTH - 160 - 32, 28) # Margen de 32px (simétrico al de la batería)
 	_generation_combo.pivot_offset = Vector2(160, 30) # Pivote en el centro-derecha para escalarse hacia la izquierda de forma natural
 	_generation_combo.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_generation_combo.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -3881,7 +4066,7 @@ func _setup_combo_ui():
 	_green_score_label.name = "GreenScoreLabel"
 	_green_score_label.text = "0"
 	_green_score_label.size = Vector2(160, 48)
-	_green_score_label.position = Vector2(1152 - 160 - 32, 92) # Situado justo debajo del combo (28 + 64 = 92)
+	_green_score_label.position = Vector2(SCREEN_WIDTH - 160 - 32, 92) # Situado justo debajo del combo (28 + 64 = 92)
 	_green_score_label.pivot_offset = Vector2(160, 24)
 	_green_score_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_green_score_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -3903,15 +4088,20 @@ func _setup_combo_ui():
 func _setup_classification_area():
 	_classification_area = Control.new()
 	_classification_area.name = "ClassificationArea"
-	_classification_area.custom_minimum_size = Vector2(1152, 648)
-	_classification_area.size = Vector2(1152, 648)
+	_classification_area.custom_minimum_size = Vector2(SCREEN_WIDTH, SCREEN_HEIGHT)
+	_classification_area.size = Vector2(SCREEN_WIDTH, SCREEN_HEIGHT)
+	
+	var is_portrait = SCREEN_HEIGHT > SCREEN_WIDTH
 	
 	# Centrar el contenido usando un VBoxContainer
 	var vbox = VBoxContainer.new()
 	vbox.name = "VBox"
-	vbox.custom_minimum_size = Vector2(560, 440)
-	vbox.size = Vector2(560, 440)
-	vbox.position = Vector2((1152 - 560) / 2, (648 - 440) / 2)
+	vbox.custom_minimum_size = Vector2(560, 540)
+	vbox.size = Vector2(560, 540)
+	if is_portrait:
+		vbox.position = Vector2((SCREEN_WIDTH - 560) / 2, (SCREEN_HEIGHT - 540) / 2 - 80)
+	else:
+		vbox.position = Vector2((SCREEN_WIDTH - 560) / 2, (SCREEN_HEIGHT - 540) / 2)
 	vbox.add_theme_constant_override("separation", 24)
 	_classification_area.add_child(vbox)
 	
@@ -4079,9 +4269,15 @@ func _setup_classification_area():
 	statue_left.stretch_mode = TextureRect.STRETCH_SCALE
 	statue_left.clip_contents = true
 	statue_left.texture = load("res://assets/estatuaHombre.png")
-	statue_left.custom_minimum_size = Vector2(187, 500)
-	statue_left.size = Vector2(187, 500)
-	statue_left.position = Vector2(40, (648 - 500) / 2.0)
+	if is_portrait:
+		statue_left.custom_minimum_size = Vector2(135, 360)
+		statue_left.size = Vector2(135, 360)
+		statue_left.position = Vector2(32, SCREEN_HEIGHT - 360 - 24)
+	else:
+		statue_left.custom_minimum_size = Vector2(187, 500)
+		statue_left.size = Vector2(187, 500)
+		statue_left.position = Vector2(40, (SCREEN_HEIGHT - 500) / 2.0)
+	statue_left.visible = true
 	_classification_area.add_child(statue_left)
 	
 	# Estatua Mujer (Derecha) - Dimensiones recortadas 430x1176, escalada a alto 500
@@ -4091,9 +4287,15 @@ func _setup_classification_area():
 	statue_right.stretch_mode = TextureRect.STRETCH_SCALE
 	statue_right.clip_contents = true
 	statue_right.texture = load("res://assets/estatuaMujer.png")
-	statue_right.custom_minimum_size = Vector2(183, 500)
-	statue_right.size = Vector2(183, 500)
-	statue_right.position = Vector2(1152 - 183 - 40, (648 - 500) / 2.0)
+	if is_portrait:
+		statue_right.custom_minimum_size = Vector2(132, 360)
+		statue_right.size = Vector2(132, 360)
+		statue_right.position = Vector2(SCREEN_WIDTH - 132 - 32, SCREEN_HEIGHT - 360 - 24)
+	else:
+		statue_right.custom_minimum_size = Vector2(183, 500)
+		statue_right.size = Vector2(183, 500)
+		statue_right.position = Vector2(SCREEN_WIDTH - 183 - 40, (SCREEN_HEIGHT - 500) / 2.0)
+	statue_right.visible = true
 	_classification_area.add_child(statue_right)
 
 	_classification_area.hide()
@@ -4114,10 +4316,10 @@ func _on_submit_pressed():
 		submit_btn.disabled = true
 		
 	# Calcular la nueva posición Y del menú principal (un alto de pantalla debajo de la cámara actual)
-	var new_menu_y = camera.position.y + 648.0
+	var new_menu_y = camera.position.y + SCREEN_HEIGHT
 	
 	# Reposicionar el Menú Principal según el idioma seleccionado
-	var target_menu_x = 0.0 if current_language == "en" else -1152.0
+	var target_menu_x = 0.0 if current_language == "en" else -SCREEN_WIDTH
 	_menu_node.position = Vector2(target_menu_x, new_menu_y)
 	
 	# Resetear el estado del juego en-situ (limpieza, reseteo de offset y reposicionamiento de padres)
@@ -4144,10 +4346,10 @@ func _on_back_to_menu_pressed():
 		cancel_btn.disabled = true
 		
 	# Calcular la nueva posición Y del menú principal (un alto de pantalla debajo de la cámara actual)
-	var new_menu_y = camera.position.y + 648.0
+	var new_menu_y = camera.position.y + SCREEN_HEIGHT
 	
 	# Reposicionar el Menú Principal según el idioma seleccionado
-	var target_menu_x_back = 0.0 if current_language == "en" else -1152.0
+	var target_menu_x_back = 0.0 if current_language == "en" else -SCREEN_WIDTH
 	_menu_node.position = Vector2(target_menu_x_back, new_menu_y)
 	
 	# Resetear el estado del juego en-situ (limpieza, reseteo de offset y reposicionamiento de padres)
@@ -4179,9 +4381,12 @@ func _reset_game_state_to_menu(new_menu_y: float):
 	in_menu = true
 	is_drawing = false
 	is_retracting = false
+	if _mobile_retract_btn:
+		_mobile_retract_btn.hide()
 	waiting_for_next = false
-	camera_speed = 15.0
-	target_camera_speed = 15.0
+	var base_speed = 24.0 if (OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]) else 15.0
+	camera_speed = base_speed
+	target_camera_speed = base_speed
 	
 	if _fade_top and _fade_bottom:
 		var fade_tween = create_tween()
@@ -4206,7 +4411,7 @@ func _reset_game_state_to_menu(new_menu_y: float):
 	if _leaderboard_back_btn: _leaderboard_back_btn.hide()
 	
 	# 2. Resetear offset de juego a un alto de pantalla abajo del nuevo menú
-	current_game_y_offset = new_menu_y + 648.0
+	current_game_y_offset = new_menu_y + SCREEN_HEIGHT
 	
 	# 3. Limpiar raíces viejas
 	for child in roots_container.get_children():
@@ -4229,8 +4434,13 @@ func _reset_game_state_to_menu(new_menu_y: float):
 	ancestor.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
 	descendant.size = Vector2(GRID_SIZE * 3, GRID_SIZE * 3)
 	
-	ancestor.position = Vector2(192 - GRID_SIZE, current_game_y_offset + 256.0 - GRID_SIZE)
-	descendant.position = Vector2(896 - GRID_SIZE, current_game_y_offset + 256.0 - GRID_SIZE)
+	var is_portrait = SCREEN_HEIGHT > SCREEN_WIDTH
+	if is_portrait:
+		ancestor.position = Vector2(96.0 - GRID_SIZE * 1.5, current_game_y_offset + 600.0 - GRID_SIZE * 1.5)
+		descendant.position = Vector2(SCREEN_WIDTH - 96.0 - GRID_SIZE * 1.5, current_game_y_offset + 600.0 - GRID_SIZE * 1.5)
+	else:
+		ancestor.position = Vector2(192.0 - GRID_SIZE * 1.5, current_game_y_offset + 256.0 - GRID_SIZE * 1.5)
+		descendant.position = Vector2(896.0 - GRID_SIZE * 1.5, current_game_y_offset + 256.0 - GRID_SIZE * 1.5)
 	
 	ancestor.active = true
 	descendant.active = true
@@ -4255,8 +4465,12 @@ func _reset_game_state_to_menu(new_menu_y: float):
 		
 	_mechanics_tutorial_panel = Panel.new()
 	_mechanics_tutorial_panel.name = "MechanicsTutorialPanel"
-	_mechanics_tutorial_panel.size = Vector2(920, 154) # Altura reducida de 180 a 154
-	_mechanics_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 18) # ABOVE the portraits!
+	if is_portrait:
+		_mechanics_tutorial_panel.size = Vector2(560, 300)
+		_mechanics_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 280, current_game_y_offset + 40)
+	else:
+		_mechanics_tutorial_panel.size = Vector2(920, 154)
+		_mechanics_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 460, current_game_y_offset + 18)
 	
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(0.04, 0.04, 0.06, 0.85) # Glassmorphism oscuro
@@ -4281,8 +4495,12 @@ func _reset_game_state_to_menu(new_menu_y: float):
 		
 	_sap_tutorial_panel = Panel.new()
 	_sap_tutorial_panel.name = "SapTutorialPanel"
-	_sap_tutorial_panel.size = Vector2(920, 136) # Altura incrementada de 120 a 136
-	_sap_tutorial_panel.position = Vector2(1152 / 2.0 - 460, current_game_y_offset + 396) # BELOW the portraits!
+	if is_portrait:
+		_sap_tutorial_panel.size = Vector2(560, 156)
+		_sap_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 280, current_game_y_offset + 900)
+	else:
+		_sap_tutorial_panel.size = Vector2(920, 136)
+		_sap_tutorial_panel.position = Vector2(SCREEN_WIDTH / 2.0 - 460, current_game_y_offset + 412)
 	_sap_tutorial_panel.add_theme_stylebox_override("panel", style)
 	add_child(_sap_tutorial_panel)
 	_sap_tutorial_panel.hide()
@@ -4441,7 +4659,7 @@ func _setup_fade_overlays():
 	
 	var tex_top = GradientTexture2D.new()
 	tex_top.gradient = gradient_top
-	tex_top.width = 1152
+	tex_top.width = SCREEN_WIDTH
 	tex_top.height = 96
 	tex_top.fill = GradientTexture2D.FILL_LINEAR
 	tex_top.fill_from = Vector2(0.5, 0.0)
@@ -4471,7 +4689,7 @@ func _setup_fade_overlays():
 	
 	var tex_bottom = GradientTexture2D.new()
 	tex_bottom.gradient = gradient_bottom
-	tex_bottom.width = 1152
+	tex_bottom.width = SCREEN_WIDTH
 	tex_bottom.height = 96
 	tex_bottom.fill = GradientTexture2D.FILL_LINEAR
 	tex_bottom.fill_from = Vector2(0.5, 0.0)
@@ -4682,6 +4900,94 @@ func _toggle_fullscreen() -> void:
 
 func _on_viewport_size_changed() -> void:
 	var viewport_size = get_viewport().get_visible_rect().size
-	var offset_x = (viewport_size.x - 1152.0) / 2.0
+	var offset_x = (viewport_size.x - SCREEN_WIDTH) / 2.0
 	camera.offset.x = -offset_x
 	$UI.offset.x = offset_x
+	if _mobile_retract_btn:
+		_mobile_retract_btn.position = Vector2(viewport_size.x - offset_x - 96 - 20, viewport_size.y - 96 - 20)
+
+func register_path_in_grid(path: Array[Vector2]):
+	for i in range(path.size() - 1):
+		var p1 = path[i]
+		var p2 = path[i+1]
+		var dist = p1.distance_to(p2)
+		var num_cells = int(dist / GRID_SIZE)
+		for j in range(num_cells + 1):
+			var cell_pos = p1.lerp(p2, float(j) / max(1.0, float(num_cells)))
+			var grid_p = get_grid_pos(cell_pos)
+			if not _occupied_previous_points.has(grid_p):
+				all_previous_paths.append(grid_p)
+				_occupied_previous_points[grid_p] = true
+
+func check_path_collisions(path: Array[Vector2]) -> int:
+	var collisions = 0
+	for i in range(path.size() - 1):
+		var p1 = path[i]
+		var p2 = path[i+1]
+		var dist = p1.distance_to(p2)
+		var num_cells = int(dist / GRID_SIZE)
+		for j in range(num_cells + 1):
+			var cell_pos = p1.lerp(p2, float(j) / max(1.0, float(num_cells)))
+			var grid_p = get_grid_pos(cell_pos)
+			if _occupied_previous_points.has(grid_p):
+				collisions += 1
+	return collisions
+
+func _setup_mobile_ui():
+	var is_mobile = OS.has_feature("mobile") or OS.get_name() in ["Android", "iOS"]
+	if not is_mobile:
+		return
+		
+	_mobile_retract_btn = Button.new()
+	_mobile_retract_btn.name = "MobileRetractBtn"
+	_mobile_retract_btn.size = Vector2(96, 96)
+	_mobile_retract_btn.position = Vector2(SCREEN_WIDTH - 96 - 20, SCREEN_HEIGHT - 96 - 20)
+	
+	# Estilo normal (no pulsado)
+	var style_normal = StyleBoxFlat.new()
+	style_normal.bg_color = Color(0.15, 0.05, 0.05, 0.75) # Glassmorphism oscuro rojizo
+	style_normal.border_width_left = 3
+	style_normal.border_width_top = 3
+	style_normal.border_width_right = 3
+	style_normal.border_width_bottom = 3
+	style_normal.border_color = Color(1.0, 0.3, 0.3, 0.9) # Rojo brillante
+	style_normal.corner_radius_top_left = 48
+	style_normal.corner_radius_top_right = 48
+	style_normal.corner_radius_bottom_left = 48
+	style_normal.corner_radius_bottom_right = 48
+	style_normal.shadow_color = Color(0, 0, 0, 0.5)
+	style_normal.shadow_size = 8
+	
+	# Estilo pulsado
+	var style_pressed = StyleBoxFlat.new()
+	style_pressed.bg_color = Color(0.35, 0.1, 0.1, 0.9) # Rojo oscuro
+	style_pressed.border_width_left = 3
+	style_pressed.border_width_top = 3
+	style_pressed.border_width_right = 3
+	style_pressed.border_width_bottom = 3
+	style_pressed.border_color = Color(1.0, 0.6, 0.6, 1.0) # Rojo claro/rosa neón
+	style_pressed.corner_radius_top_left = 48
+	style_pressed.corner_radius_top_right = 48
+	style_pressed.corner_radius_bottom_left = 48
+	style_pressed.corner_radius_bottom_right = 48
+	style_pressed.shadow_color = Color(0, 0, 0, 0.8)
+	style_pressed.shadow_size = 12
+	
+	_mobile_retract_btn.add_theme_stylebox_override("normal", style_normal)
+	_mobile_retract_btn.add_theme_stylebox_override("pressed", style_pressed)
+	_mobile_retract_btn.add_theme_stylebox_override("hover", style_normal)
+	_mobile_retract_btn.add_theme_stylebox_override("focus", style_normal)
+	
+	# Texto en el botón
+	_mobile_retract_btn.text = "UNDO" if current_language == "en" else "DESHACER"
+	if _title_font:
+		_mobile_retract_btn.add_theme_font_override("font", _title_font)
+	_mobile_retract_btn.add_theme_font_size_override("font_size", 12)
+	_mobile_retract_btn.add_theme_color_override("font_color", Color(1, 0.9, 0.9))
+	
+	# Conectar señales utilizando callables anónimos para mayor compatibilidad y limpieza
+	_mobile_retract_btn.button_down.connect(func(): is_retracting = true)
+	_mobile_retract_btn.button_up.connect(func(): is_retracting = false)
+	
+	$UI.add_child(_mobile_retract_btn)
+	_mobile_retract_btn.hide() # Se mostrará cuando el juego empiece y se ocultará en el menú
